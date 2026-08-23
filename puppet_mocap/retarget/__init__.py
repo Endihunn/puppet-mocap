@@ -119,7 +119,8 @@ def apply_pose(landmarks=None, *, hands_data=None, face_data=None,
                calibrate: bool = True,
                enable_body: bool = True, enable_hands: bool = True,
                enable_face: bool = False,
-               root_translation: bool = False, root_scale: float = 1.0):
+               root_translation: bool = False, root_scale: float = 1.0,
+               debug_hands: bool = False):
     """Aplica una pose dispatcheando a los módulos habilitados.
 
     Parámetros principales:
@@ -148,6 +149,7 @@ def apply_pose(landmarks=None, *, hands_data=None, face_data=None,
         hands_data = _calibrate_hands_payload(hands_data, R)
 
     set_tick(time.time(), rotation_smooth)
+    common._state["debug_hands"] = debug_hands
 
     moved = {"body": 0, "hands": 0, "face": 0}
 

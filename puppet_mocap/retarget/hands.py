@@ -170,12 +170,15 @@ def _palm_basis(side: str, pts, flip_normal: bool = False, handedness: str | Non
     # Diag continuo (throttled ~1.5s/lado): si al rotar la muñeca el handedness
     # se mantiene estable, el signo del normal no parpadea = fix correcto. Si
     # el handedness se voltea aquí, el problema es la clasificación de MediaPipe.
-    _tk = f"_palm_log_t_{side}"
-    _now = time.time()
-    if _now - _state.get(_tk, 0.0) > 1.5:
-        _state[_tk] = _now
-        log.info(f"[palmaV3] {side} hd={handedness} "
-                 f"normal=({normal.x:+.2f},{normal.y:+.2f},{normal.z:+.2f})")
+    # P4: tras la property debug_hands (off por defecto) — antes logueaba por
+    # lado cada 1.5 s toda la sesión.
+    if _state.get("debug_hands"):
+        _tk = f"_palm_log_t_{side}"
+        _now = time.time()
+        if _now - _state.get(_tk, 0.0) > 1.5:
+            _state[_tk] = _now
+            log.info(f"[palmaV3] {side} hd={handedness} "
+                     f"normal=({normal.x:+.2f},{normal.y:+.2f},{normal.z:+.2f})")
 
     return fwd, normal
 

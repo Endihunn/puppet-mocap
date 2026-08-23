@@ -522,6 +522,7 @@ def _drain_tick():
                 enable_face=props.enable_face,
                 root_translation=props.enable_root_translation,
                 root_scale=props.root_translation_scale,
+                debug_hands=props.debug_hands,
             )
         except Exception as e:
             # Mensaje corto para la UI; traceback al log con rate limit
@@ -536,6 +537,13 @@ def _drain_tick():
             elapsed = m.get("_rx", now) - st["t0"]
             if elapsed < 0.0:
                 continue  # llegó durante la cuenta regresiva
+            if len(st["samples"]) >= props.max_take_samples:
+                # P4: tope de muestras — no crecer sin límite en RAM.
+                log.warn(f"tope de muestras ({props.max_take_samples}); grabación auto-detenida")
+                props.last_error = f"Tope de muestras ({props.max_take_samples}); grabación detenida"
+                _finish_recording(scene, props)
+                _tag_redraw_ui()
+                return 0.02
             snap = retarget.snapshot_pose(
                 arm, props.bone_prefix, include_body, include_hands, include_face,
                 include_root=props.enable_root_translation)

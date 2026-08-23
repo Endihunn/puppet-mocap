@@ -19,15 +19,31 @@ from . import properties, operators, panel, server
 
 
 def register():
-    bpy.utils.register_class(properties.PuppetMocapProperties)
-    bpy.types.Scene.puppet_mocap = bpy.props.PointerProperty(
-        type=properties.PuppetMocapProperties
-    )
-    for cls in operators.CLASSES:
-        bpy.utils.register_class(cls)
-    for cls in panel.CLASSES:
-        bpy.utils.register_class(cls)
-    operators.register_handlers()
+    registered = []
+    try:
+        bpy.utils.register_class(properties.PuppetMocapProperties)
+        registered.append(properties.PuppetMocapProperties)
+        bpy.types.Scene.puppet_mocap = bpy.props.PointerProperty(
+            type=properties.PuppetMocapProperties
+        )
+        for cls in operators.CLASSES:
+            bpy.utils.register_class(cls)
+            registered.append(cls)
+        for cls in panel.CLASSES:
+            bpy.utils.register_class(cls)
+            registered.append(cls)
+        operators.register_handlers()
+    except Exception:
+        # P4: un fallo a media iteración dejaba Blender con registro parcial.
+        operators.unregister_handlers()
+        if hasattr(bpy.types.Scene, "puppet_mocap"):
+            del bpy.types.Scene.puppet_mocap
+        for cls in reversed(registered):
+            try:
+                bpy.utils.unregister_class(cls)
+            except Exception:
+                pass
+        raise
 
 
 def unregister():

@@ -42,8 +42,11 @@ def set_target_armature(name: str | None):
 
 
 def _cache_arm(arm):
-    for pb in arm.pose.bones:
-        pb.rotation_mode = "QUATERNION"
+    # arm.pose puede ser None para un armature SIN huesos (Blender 5.x) —
+    # no iterar en ese caso para no reventar get_armature().
+    if arm.pose is not None:
+        for pb in arm.pose.bones:
+            pb.rotation_mode = "QUATERNION"
     # Guardar SOLO el nombre: un puntero al objeto bpy queda stale tras
     # undo/File>Open (los ID se re-asignan sin invalidar el wrapper Python y el
     # acceso cae a memoria liberada = crash, no excepción). El lookup por
@@ -162,9 +165,18 @@ def lm_visibility(lm) -> float:
 _MIRROR_PAIRS = ((1, 4), (2, 5), (3, 6), (7, 8), (9, 10), (11, 12), (13, 14),
                  (15, 16), (17, 18), (19, 20), (21, 22), (23, 24), (25, 26),
                  (27, 28), (29, 30), (31, 32))
-_MIRROR_IDX = list(range(33))
-for _a, _b in _MIRROR_PAIRS:
-    _MIRROR_IDX[_a], _MIRROR_IDX[_b] = _b, _a
+
+
+def _build_mirror_idx() -> list:
+    """Índice de espejo para los 33 landmarks. Función (P4): el loop no debe
+    dejar `_a`/`_b` colgando en el namespace del módulo."""
+    idx = list(range(33))
+    for a, b in _MIRROR_PAIRS:
+        idx[a], idx[b] = b, a
+    return idx
+
+
+_MIRROR_IDX = _build_mirror_idx()
 
 
 def mirror_pose_landmarks(landmarks):

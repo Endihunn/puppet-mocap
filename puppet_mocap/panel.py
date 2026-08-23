@@ -198,6 +198,7 @@ class PUPPET_PT_main(bpy.types.Panel):
         sub = col.row(align=True)
         sub.active = not props.use_scene_fps
         sub.prop(props, "rec_fps")
+        col.prop(props, "max_take_samples")
         # P2-3: si enviamos más muestras/s que frames de grabación, colisionan y
         # gana la última (descarte silencioso). Avisar en vez de callar.
         eff_fps = (context.scene.render.fps / context.scene.render.fps_base
@@ -254,6 +255,7 @@ class PUPPET_PT_main(bpy.types.Panel):
         col = box.column(align=True)
         col.prop(props, "rotation_smooth")
         col.prop(props, "min_visibility")
+        col.prop(props, "debug_hands")
         col.separator()
         # Estos solo se leen al INICIAR captura — editarlos a media sesión no
         # hace nada, así que se bloquean para no confundir

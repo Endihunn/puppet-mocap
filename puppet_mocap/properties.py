@@ -142,6 +142,13 @@ class PuppetMocapProperties(bpy.types.PropertyGroup):
         min=10.0,
         max=120.0,
     )
+    max_take_samples: bpy.props.IntProperty(
+        name="Máx. muestras por toma",
+        description="Tope de muestras en RAM por toma (P4). Al alcanzarlo la grabación se auto-detiene y hornea lo acumulado.",
+        default=30000,
+        min=1000,
+        max=1000000,
+    )
     smooth_min_cutoff: bpy.props.FloatProperty(
         name="Landmark cutoff",
         description="One Euro Filter min_cutoff sobre landmarks (Hz). Más bajo = menos jitter en quietos, más lag",
@@ -163,6 +170,11 @@ class PuppetMocapProperties(bpy.types.PropertyGroup):
         min=0.0,
         max=1.0,
         subtype="FACTOR",
+    )
+    debug_hands: bpy.props.BoolProperty(
+        name="Debug manos",
+        description="Loguea la normal de palma por lado (~1.5 s) para depurar flips de muñeca. Solo desarrollo.",
+        default=False,
     )
     # --- Toggles de módulos ---
     enable_body: bpy.props.BoolProperty(
