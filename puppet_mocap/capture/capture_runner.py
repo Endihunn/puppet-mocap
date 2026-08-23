@@ -531,6 +531,10 @@ def main():
 
     finally:
         reader.stop()
+        # P0-2: el reader puede estar bloqueado dentro de cap.read() cuando
+        # soltamos el VideoCapture por debajo (uso-después-de-liberar en el lado
+        # C++ de OpenCV). join() lo deja salir limpio antes de release().
+        reader.join(timeout=2.0)
         cap.release()
         cv2.destroyAllWindows()
         if executor is not None:

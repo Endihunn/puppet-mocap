@@ -190,6 +190,12 @@ class PUPPET_PT_main(bpy.types.Panel):
         sub = col.row(align=True)
         sub.active = not props.use_scene_fps
         sub.prop(props, "rec_fps")
+        row = box.row(align=True)
+        row.enabled = (not running) and (
+            ops_mod._baked_state.get("body") is not None
+            or ops_mod._baked_state.get("face") is not None
+        )
+        row.prop(props, "play_take", text="Reproducir toma", toggle=True)
         box.operator("puppet_mocap.clear_keyframes", icon="TRASH")
 
         # --- Rig ---

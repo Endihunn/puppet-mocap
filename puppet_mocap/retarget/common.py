@@ -15,8 +15,6 @@ from mathutils import Matrix, Quaternion, Vector
 
 from .. import log
 
-PUPPET_INIT_FLAG = "puppet_mocap_initialized"
-
 # Estado global compartido por los módulos de retarget. Vive a nivel de proceso
 # Blender — una sola sesión de mocap a la vez.
 _state: dict = {
@@ -46,8 +44,24 @@ def set_target_armature(name: str | None):
 def _cache_arm(arm):
     for pb in arm.pose.bones:
         pb.rotation_mode = "QUATERNION"
-    _state["arm"] = arm
+    # Guardar SOLO el nombre: un puntero al objeto bpy queda stale tras
+    # undo/File>Open (los ID se re-asignan sin invalidar el wrapper Python y el
+    # acceso cae a memoria liberada = crash, no excepción). El lookup por
+    # nombre es un hash barato incluso a 50 Hz.
+    _state["arm"] = arm.name
     return arm
+
+
+def _resolve_cached_arm():
+    """Devuelve el armature cacheado por nombre, o None si ya no existe."""
+    name = _state.get("arm")
+    if not name:
+        return None
+    obj = bpy.data.objects.get(name)
+    if obj is not None and obj.type == "ARMATURE":
+        return obj
+    _state["arm"] = None
+    return None
 
 
 def get_armature():
@@ -57,22 +71,14 @@ def get_armature():
     if name:
         obj = bpy.data.objects.get(name)
         if obj is not None and obj.type == "ARMATURE":
-            arm = _state.get("arm")
-            try:
-                if arm is not None and arm.name == name:
-                    return arm
-            except ReferenceError:
-                pass
+            cached = _resolve_cached_arm()
+            if cached is not None and cached.name == name:
+                return cached
             return _cache_arm(obj)
         # objetivo desapareció → cae al auto
-    arm = _state.get("arm")
+    arm = _resolve_cached_arm()
     if arm is not None:
-        try:
-            if arm.name in bpy.data.objects:
-                return arm
-        except ReferenceError:
-            pass
-        _state["arm"] = None
+        return arm
     try:
         scene_objs = bpy.context.scene.objects
     except AttributeError:
@@ -86,26 +92,24 @@ def get_armature():
 
 
 def fix_orientation(force: bool = False, prefix: str = "mixamorig:") -> bool:
-    """Prepara el rig para capturar. NO borra actions (eso era pérdida de
-    datos silenciosa) y solo resetea la rotación del OBJETO con force=True
-    (botón Reset Rig) — un start normal ya no pisa la colocación del usuario."""
+    """Prepara el rig para capturar. NO borra actions y, con force=False
+    (start normal), NUNCA pisa la pose del usuario: solo garantiza el
+    rotation_mode QUATERNION (vía _cache_arm). El reseteo completo (objeto +
+    pose bones a identidad) vive únicamente en el botón Reset Rig (force=True)."""
     arm = get_armature()
     if arm is None:
         return False
     reset_smoothing()
-    needs_init = force or not arm.get(PUPPET_INIT_FLAG)
-    if needs_init:
-        log.info(f"inicializando armature '{arm.name}' prefix='{prefix}' force={force}")
-        if force:
-            arm.rotation_mode = "XYZ"
-            arm.rotation_euler = (0.0, 0.0, 0.0)
-            arm.rotation_quaternion = (1.0, 0.0, 0.0, 0.0)
+    if force:
+        log.info(f"reset armature '{arm.name}' prefix='{prefix}'")
+        arm.rotation_mode = "XYZ"
+        arm.rotation_euler = (0.0, 0.0, 0.0)
+        arm.rotation_quaternion = (1.0, 0.0, 0.0, 0.0)
         for pb in arm.pose.bones:
             pb.rotation_mode = "QUATERNION"
             pb.rotation_quaternion = (1.0, 0.0, 0.0, 0.0)
             pb.location = (0.0, 0.0, 0.0)
             pb.scale = (1.0, 1.0, 1.0)
-        arm[PUPPET_INIT_FLAG] = True
         _state["last_axis_dump"] = False
     bpy.context.view_layer.update()
     return True
@@ -118,6 +122,12 @@ def clear_all_keyframes() -> bool:
         return False
     if arm.animation_data and arm.animation_data.action:
         bpy.data.actions.remove(arm.animation_data.action, do_unlink=True)
+    # Las tomas horneadas quedan desasignadas del slot en vivo (P0-1) pero
+    # conservadas con fake_user + marcador; purgarlas aquí para que "Borrar
+    # Keyframes" siga limpiando la animación completa.
+    for action in list(bpy.data.actions):
+        if action.get("puppet_mocap_take"):
+            bpy.data.actions.remove(action, do_unlink=True)
     # Animación de shape keys vive en un datablock aparte (Key) — sin esto,
     # la actuación facial vieja sobrevivía a "Borrar Keyframes".
     from . import face as _face

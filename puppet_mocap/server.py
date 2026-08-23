@@ -4,6 +4,7 @@ de captura y los pone en una queue que el main thread drena vía bpy.app.timers.
 import json
 import queue
 import socket
+import sys
 import threading
 import time
 
@@ -112,7 +113,17 @@ def start(port: int) -> tuple[bool, str]:
     if is_running():
         return False, "el server ya está corriendo"
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    if sys.platform == "win32":
+        # Windows: SO_REUSEADDR permite a otro socket secuestrar un puerto con
+        # listener activo (un bind wildcard se cuela sobre 127.0.0.1 y la
+        # entrega de conexiones queda indefinida). SO_EXCLUSIVEADDRUSE falla
+        # limpio si el puerto ya está tomado.
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        except OSError:
+            pass
+    else:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
         sock.bind(("127.0.0.1", port))
         sock.listen(1)
@@ -133,13 +144,19 @@ def start(port: int) -> tuple[bool, str]:
     return True, ""
 
 
-def stop():
+def stop() -> bool:
+    """Devuelve True si el thread terminó y el estado quedó limpio; False si
+    el join expiró (el thread sigue vivo y `is_running()` debe seguir
+    devolviendo True para no lanzar un segundo server encima del zombi)."""
     ev = _state["stop_event"]
     if ev is not None:
         ev.set()
     th = _state["thread"]
     if th is not None:
         th.join(timeout=2.0)
+        if th.is_alive():
+            log.warn("server thread no terminó tras join(2s); estado NO limpiado")
+            return False
     _state["thread"] = None
     _state["stop_event"] = None
     _state["client_connected"] = False
@@ -148,3 +165,4 @@ def stop():
             POSE_QUEUE.get_nowait()
         except queue.Empty:
             break
+    return True

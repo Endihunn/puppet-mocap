@@ -6,6 +6,11 @@ def _poll_armature(self, obj):
     return obj.type == "ARMATURE"
 
 
+def _play_take_update(self, context):
+    from . import operators
+    operators.set_take_playback(self.play_take)
+
+
 class PuppetMocapProperties(bpy.types.PropertyGroup):
     # Estado runtime (no se persiste a través de file save porque OPTIONS={'SKIP_SAVE'})
     server_running: bpy.props.BoolProperty(
@@ -60,6 +65,13 @@ class PuppetMocapProperties(bpy.types.PropertyGroup):
         name="Huesos esperados",
         default=0,
         options={"SKIP_SAVE"},
+    )
+    play_take: bpy.props.BoolProperty(
+        name="Reproducir toma",
+        description="Re-asigna la última toma horneada al rig para reproducirla. Desactívalo para volver a la captura en vivo.",
+        default=False,
+        options={"SKIP_SAVE"},
+        update=_play_take_update,
     )
 
     # Settings persistidos

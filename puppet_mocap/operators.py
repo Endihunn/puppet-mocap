@@ -17,6 +17,10 @@ from . import log, retarget, server
 # Subprocess + log file handle (no son serializables, no caben en PropertyGroup)
 _subprocess_state = {"proc": None, "log_fh": None}
 
+# Nombre de la última toma horneada (cuerpo/cara). Se desasigna del slot en
+# vivo al hornear (P0-1) y "Reproducir toma" la re-asigna por nombre.
+_baked_state = {"body": None, "face": None}
+
 # Estado de grabación. NO vive en PropertyGroup: los RNA floats son float32 y
 # un epoch (~1.78e9) pierde ±64 s de precisión — la grabación entera salía
 # corrida de frames. Aquí son floats de Python de 64 bits.
@@ -71,6 +75,37 @@ def _sync_target(props):
     """Propaga el armature elegido en la UI al estado del retarget."""
     obj = props.target_armature
     retarget.set_target_armature(obj.name if obj is not None else None)
+
+
+def _assign_action(id_data, kind: str, play: bool):
+    """Asigna/desasigna la última toma horneada (por nombre) a `id_data`."""
+    name = _baked_state.get(kind)
+    if play:
+        if not name:
+            return
+        action = bpy.data.actions.get(name)
+        if action is None:
+            return
+        ad = id_data.animation_data
+        if ad is None:
+            ad = id_data.animation_data_create()
+        ad.action = action  # auto-asigna el slot (verificado en Blender 5.1)
+    else:
+        ad = id_data.animation_data
+        if ad is not None and ad.action is not None:
+            ad.action.use_fake_user = True
+            ad.action = None
+
+
+def set_take_playback(play: bool):
+    """Toggle "Reproducir toma": re-asigna la última toma (cuerpo + cara) al
+    armature objetivo, o la desasigna para volver a la captura en vivo."""
+    arm = retarget.get_armature()
+    if arm is not None:
+        _assign_action(arm, "body", play)
+        mesh = retarget.face.get_cached_mesh(arm)
+        if mesh is not None and mesh.data.shape_keys is not None:
+            _assign_action(mesh.data.shape_keys, "face", play)
 
 
 def _load_calibration(props):
@@ -132,7 +167,8 @@ def _cleanup_capture(props=None, *, unregister_timer: bool = True):
     """Apaga todo: subprocess, server, timer. Compartido por stop_capture,
     el watchdog del timer, unregister() y el handler de load_pre."""
     _terminate_subprocess()
-    server.stop()
+    if not server.stop():
+        log.warn("server.stop() dejó el thread vivo (is_running seguirá True)")
     _record_state.update(pending=False, active=False, samples=[])
     _calib_state.update(collecting=False, buf=[])
     _capture_state["scene"] = None
@@ -148,10 +184,15 @@ def _cleanup_capture(props=None, *, unregister_timer: bool = True):
 @persistent
 def _on_load_pre(*_args):
     """File > Open a media captura: sin esto, el timer persistente seguía
-    retargeteando la webcam sobre el primer armature del archivo NUEVO."""
+    retargeteando la webcam sobre el primer armature del archivo NUEVO. Además
+    invalida el cache del armature (P0-4: puntero stale tras File>Open)."""
     try:
         log.info("load_pre: apagando captura")
         _cleanup_capture(None)
+        retarget.common._state["arm"] = None
+        retarget.reset_smoothing()
+        _baked_state["body"] = None
+        _baked_state["face"] = None
     except Exception:
         pass
 
@@ -219,6 +260,13 @@ def _bake_channels(id_data, id_type: str, name: str, channels: dict):
         fc.keyframe_points.foreach_set("co", flat)
         fc.keyframe_points.foreach_set("interpolation", [1] * n)  # 1 = LINEAR
         fc.update()
+    # P0-1: la action horneada NO debe quedar asignada al slot en vivo — sus
+    # fcurves re-evaluarían en cada cambio de frame y pisarían la captura en
+    # vivo (el rig "rebota" a la pose horneada). Se conserva con fake_user y un
+    # marcador; el panel la re-asigna con "Reproducir toma".
+    action["puppet_mocap_take"] = True
+    action.use_fake_user = True
+    ad.action = None
     return action
 
 
@@ -254,24 +302,31 @@ def _bake_take(arm, samples, start_frame: int, fps: float):
             prev = q
         bone_tracks[name] = fixed
 
+    body_action = None
+    face_action = None
     if bone_tracks:
         channels = {}
         for name, pts in bone_tracks.items():
-            path = f'pose.bones["{name}"].rotation_quaternion'
+            esc = bpy.utils.escape_identifier(name)
+            path = f'pose.bones["{esc}"].rotation_quaternion'
             for i in range(4):
                 channels[(path, i, name)] = [(f, q[i]) for f, q in pts]
-        _bake_channels(arm, "OBJECT", "PuppetTake", channels)
+        body_action = _bake_channels(arm, "OBJECT", "PuppetTake", channels)
 
     if shape_tracks:
         mesh = retarget.face.get_cached_mesh(arm)
         if mesh is not None:
             channels = {
-                (f'key_blocks["{name}"].value', 0, None): pts
+                (f'key_blocks["{bpy.utils.escape_identifier(name)}"].value', 0, None): pts
                 for name, pts in shape_tracks.items()
             }
-            _bake_channels(mesh.data.shape_keys, "KEY", "PuppetTake_cara", channels)
+            face_action = _bake_channels(
+                mesh.data.shape_keys, "KEY", "PuppetTake_cara", channels)
 
-    return "PuppetTake", (frames[0], frames[-1])
+    _baked_state["body"] = body_action.name if body_action is not None else None
+    _baked_state["face"] = face_action.name if face_action is not None else None
+    name = _baked_state["body"] or _baked_state["face"]
+    return name, (frames[0], frames[-1])
 
 
 def _finish_recording(scene, props):
@@ -294,6 +349,7 @@ def _finish_recording(scene, props):
             scene.frame_current = st["start_frame"]
             log.info(f"toma horneada: frames {f0}-{f1} "
                      f"({len(st['samples'])} samples @ {st['fps']:.3g} fps)")
+    props.play_take = False
     st.update(pending=False, active=False, samples=[])
     return result
 
@@ -457,6 +513,10 @@ class PUPPET_OT_start_capture(bpy.types.Operator):
 
         _sync_target(props)
         _load_calibration(props)
+        # No dejar una toma reproduciéndose: sus fcurves pisarían la captura
+        # en vivo al cambiar de frame (P0-1).
+        props.play_take = False
+        set_take_playback(False)
         arm = retarget.get_armature()
         if arm is None:
             log.error("Sin armature al iniciar captura")
@@ -635,7 +695,7 @@ class PUPPET_OT_toggle_record(bpy.types.Operator):
             if result is not None:
                 _name, (f0, f1) = result
                 log.info(f"REC stop; toma {f0}-{f1}")
-                self.report({"INFO"}, f"Toma grabada: frames {f0}-{f1} (action 'PuppetTake')")
+                self.report({"INFO"}, f"Toma grabada: frames {f0}-{f1} (action '{_name}')")
             else:
                 self.report({"INFO"}, "Grabación cancelada (sin datos)")
             return {"FINISHED"}
