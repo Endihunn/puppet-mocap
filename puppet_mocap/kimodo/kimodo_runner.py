@@ -52,7 +52,6 @@ def main():
     model = _val("--model", "kimodo-soma-rp")
     out = _val("--out")
     seed = _val("--seed")
-    no_pp = "--no-postprocess" in argv
     ntf = _val("--num_transition_frames", "5")
 
     if not prompt or not out:
@@ -85,8 +84,10 @@ def main():
                 "--num_transition_frames", str(ntf)]
     if seed is not None:
         sys.argv += ["--seed", str(seed)]
-    if no_pp:
-        sys.argv += ["--no-postprocess"]
+    # motion_correction (foot-skate C++) está FUERA de alcance (brief K2): sin
+    # --no-postprocess el postprocess pide el paquete C++ y falla. Siempre
+    # pasamos --no-postprocess (pérdida menor de calidad de foot-skate).
+    sys.argv += ["--no-postprocess"]
 
     try:
         gen.main()
