@@ -7,5 +7,11 @@ target-version = "py311"
 select = ["E", "F"]     # pycodestyle errors + pyflakes
 ignore = ["E501", "E722", "E741"]
 
+[tool.ruff.lint.per-file-ignores]
+# bl_info DEBE ir antes de los imports (convención de addons legacy de Blender:
+# el loader lee el dict al importar). Mover los imports arriba rompería la
+# detección. NO "limpiar" estos E402.
+"puppet_mocap/__init__.py" = ["E402"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -8,7 +8,6 @@ Convención arm-space:
 from __future__ import annotations
 
 import math
-import time
 
 import bpy
 from mathutils import Matrix, Quaternion, Vector

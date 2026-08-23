@@ -860,7 +860,6 @@ class PUPPET_OT_calibrate(bpy.types.Operator):
                       "de tu pose neutral y corrige la inclinación de la cámara y tu orientación")
 
     def execute(self, context):
-        props = context.scene.puppet_mocap
         if not server.is_running() or not server.is_client_connected():
             self.report({"ERROR"}, "Inicia la captura (y espera al cliente) antes de calibrar")
             return {"CANCELLED"}

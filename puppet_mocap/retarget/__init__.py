@@ -17,8 +17,6 @@ from __future__ import annotations
 
 import time
 
-import bpy
-
 from .. import log
 from . import body, common, face, hands
 from .common import (

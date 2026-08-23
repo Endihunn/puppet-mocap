@@ -3,8 +3,6 @@ from __future__ import annotations
 
 import time
 
-import bpy
-
 from .. import log
 from .common import _state, aim, chained_world_3x3, mp_to_arm, orient_yz
 

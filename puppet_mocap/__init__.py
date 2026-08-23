@@ -15,7 +15,7 @@ bl_info = {
 
 import bpy
 
-from . import properties, operators, panel, server
+from . import properties, operators, panel
 
 
 def register():
