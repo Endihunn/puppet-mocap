@@ -195,6 +195,16 @@ class PUPPET_PT_main(bpy.types.Panel):
         sub = col.row(align=True)
         sub.active = not props.use_scene_fps
         sub.prop(props, "rec_fps")
+        # P2-3: si enviamos más muestras/s que frames de grabación, colisionan y
+        # gana la última (descarte silencioso). Avisar en vez de callar.
+        eff_fps = (context.scene.render.fps / context.scene.render.fps_base
+                   if props.use_scene_fps else props.rec_fps)
+        if props.send_fps > eff_fps:
+            box.label(
+                text=f"send_fps ({props.send_fps:.0f}) > fps de grabación "
+                     f"({eff_fps:.1f}): se descartarán muestras",
+                icon="ERROR",
+            )
         row = box.row(align=True)
         row.enabled = (not running) and (
             ops_mod._baked_state.get("body") is not None

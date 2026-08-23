@@ -164,18 +164,17 @@ def world_landmarks_to_list(world_lms) -> list:
              _r5(getattr(lm, "visibility", 1.0))] for lm in world_lms]
 
 
-def hand_to_absolute(hand_world_lms, pose_wrist) -> list:
-    """Suma la posición de la muñeca del Pose para obtener coords en el mismo
-    sistema que pose_world_landmarks (origen en mid-hips). Sin pose corporal,
-    pose_wrist=(0,0,0): el retarget de manos solo usa vectores relativos
-    dentro de la mano, así que la orientación sigue siendo correcta."""
-    wx, wy, wz = pose_wrist
-    return [[_r5(lm.x + wx), _r5(lm.y + wy), _r5(lm.z + wz)]
-            for lm in hand_world_lms]
+def hand_relative(hand_world_lms) -> list:
+    """Landmarks de mano RELATIVOS a la muñeca (sin sumar la posición del pose).
+    La posición absoluta se suma DESPUÉS del One Euro (P2-2): filtrar en espacio
+    absoluto abría el cutoff adaptativo por el desplazamiento del brazo y dejaba
+    de suavizar los dedos justo cuando más ruido hay."""
+    return [[_r5(lm.x), _r5(lm.y), _r5(lm.z)] for lm in hand_world_lms]
 
 
 def detect_hands_categorized(h_result, pose_image_lms, pose_world_lms):
-    """Devuelve dict {'L': {'lm': [21 lms], 'hd': str}, 'R': {...}}.
+    """Devuelve dict {'L': {'lm': [21 lms relativos a la muñeca],
+    'wrist': (x,y,z) del pose, 'hd': str}, 'R': {...}}.
 
     CON pose: empareja cada mano con pose[15]=LEFT_WRIST / pose[16]=RIGHT_WRIST
     por PROXIMIDAD en image-space. NO usa `handedness` para el L/R: la
@@ -207,8 +206,8 @@ def detect_hands_categorized(h_result, pose_image_lms, pose_world_lms):
                 if side in out:
                     continue
             out[side] = {
-                "lm": hand_to_absolute(h_result.hand_world_landmarks[i],
-                                       (0.0, 0.0, 0.0)),
+                "lm": hand_relative(h_result.hand_world_landmarks[i]),
+                "wrist": (0.0, 0.0, 0.0),
                 "hd": hd,
             }
         return out
@@ -243,7 +242,8 @@ def detect_hands_categorized(h_result, pose_image_lms, pose_world_lms):
             wrist_pose = (pose_world_lms[16].x, pose_world_lms[16].y, pose_world_lms[16].z)
 
         out[side] = {
-            "lm": hand_to_absolute(h_result.hand_world_landmarks[idx], wrist_pose),
+            "lm": hand_relative(h_result.hand_world_landmarks[idx]),
+            "wrist": wrist_pose,
             "hd": _hd(idx),
         }
 
@@ -372,17 +372,6 @@ def main():
         "R": OneEuroVec(21, freq=30.0, min_cutoff=args.smooth_min_cutoff,
                         beta=args.smooth_beta, d_cutoff=1.0),
     }
-    face_euros: dict = {}
-
-    def smooth_blendshape(name: str, val: float, t: float) -> float:
-        f = face_euros.get(name)
-        if f is None:
-            f = OneEuroVec(1, freq=30.0, min_cutoff=args.smooth_min_cutoff,
-                           beta=args.smooth_beta, d_cutoff=1.0)
-            face_euros[name] = f
-        out = f([[val, 0.0, 0.0]], t)
-        return out[0][0]
-
     interval = 1.0 / max(1.0, args.fps)
     n_frames = 0
     n_sent = 0
@@ -472,9 +461,13 @@ def main():
                     raw_hands = detect_hands_categorized(h_result, None, None)
                 hands_data = {}
                 for side, data in raw_hands.items():
+                    # P2-2: One Euro sobre landmarks RELATIVOS a la muñeca; la
+                    # posición del pose se suma después del filtro.
                     lm_smooth = hand_lm_euros[side](data["lm"], now)
+                    wx, wy, wz = data.get("wrist", (0.0, 0.0, 0.0))
                     hands_data[side] = {
-                        "lm": [[_r5(x), _r5(y), _r5(z)] for x, y, z, _ in lm_smooth],
+                        "lm": [[_r5(x + wx), _r5(y + wy), _r5(z + wz)]
+                               for x, y, z, _ in lm_smooth],
                         "hd": data.get("hd"),
                     }
                 if hands_data:
@@ -485,8 +478,10 @@ def main():
                 for cat in f_result.face_blendshapes[0]:
                     if cat.category_name == "_neutral":
                         continue
-                    bs[cat.category_name] = _r5(smooth_blendshape(
-                        cat.category_name, float(cat.score), now))
+                    # P2-1: sin filtro aquí — face.apply en el addon ya aplica
+                    # smooth_scalar (responde al slider rotation_smooth). Dos One
+                    # Euro seguidos duplicaban la latencia sin ganancia.
+                    bs[cat.category_name] = _r5(float(cat.score))
                 if bs:
                     payload["face"] = {"blendshapes": bs}
 
