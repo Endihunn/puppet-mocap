@@ -292,6 +292,10 @@ class PUPPET_PT_main(bpy.types.Panel):
                     )
                 col.prop(props, "kimodo_num_transition")
                 col.prop(props, "kimodo_model")
+                col.prop(props, "kimodo_postprocess")
+                if not props.kimodo_postprocess:
+                    col.label(text="Sin postprocess: los pies pueden patinar",
+                              icon="INFO")
                 r2 = col.row(align=True)
                 r2.prop(props, "kimodo_seed")
                 r2.operator("puppet_mocap.check_kimodo_deps", text="", icon="CHECKMARK")

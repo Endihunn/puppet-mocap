@@ -358,7 +358,7 @@ def _kimodo_bake(props, out_path) -> str:
         parent_of[b.name] = b.parent.name if b.parent else None
 
     joint_names = kconv.joint_order(j)
-    mapping = kconv.mapping_for(j)
+    mapping = kconv.prefixed_mapping(kconv.mapping_for(j), props.bone_prefix)
     rotations, root = kconv.convert_motion(
         motion, joint_names, rest3, rest_pos, parent_of, mapping, fps=30.0)
 
@@ -1220,6 +1220,8 @@ class PUPPET_OT_generate_motion(bpy.types.Operator):
                "--num_transition_frames", str(props.kimodo_num_transition)]
         if props.kimodo_seed >= 0:
             cmd += ["--seed", str(props.kimodo_seed)]
+        if props.kimodo_postprocess:
+            cmd += ["--postprocess"]
         _kill_kimodo_proc()
         try:
             log_fh = open(log.get_kimodo_log_path(), "ab")

@@ -39,15 +39,29 @@ SOMA77_TO_MIXAMO = {
     "LeftToeBase": "LeftToeBase",
     "RightLeg": "RightUpLeg", "RightShin": "RightLeg", "RightFoot": "RightFoot",
     "RightToeBase": "RightToeBase",
-    **{f"LeftHand{s}": f"LeftHand{s}" for s in (
-        "Thumb1", "Thumb2", "Thumb3", "Index1", "Index2", "Index3",
-        "Middle1", "Middle2", "Middle3", "Ring1", "Ring2", "Ring3",
-        "Pinky1", "Pinky2", "Pinky3")},
-    **{f"RightHand{s}": f"RightHand{s}" for s in (
-        "Thumb1", "Thumb2", "Thumb3", "Index1", "Index2", "Index3",
-        "Middle1", "Middle2", "Middle3", "Ring1", "Ring2", "Ring3",
-        "Pinky1", "Pinky2", "Pinky3")},
 }
+
+# DEDOS: deliberadamente AUSENTES del mapa.
+#
+# Kimodo-SOMA-RP-v1.1 corre internamente sobre SOMASkeleton30 y expande a 77 en
+# la salida rellenando las falanges con una pose relajada ESTÁTICA
+# (output_to_SOMASkeleton77 → relaxed_hands_rest_pose). Los joints existen en el
+# array pero no llevan movimiento: medido sobre walk_wave.npz, las 30 falanges
+# daban 150 keyframes con variación 0.00e+00.
+#
+# Mapearlos añadía 120 fcurves (18.000 keyframes) de relleno constante que
+# PISAN la animación de manos capturada al combinar tomas. Al no emitir canal,
+# los dedos quedan como estén y un cuerpo generado se puede combinar con manos
+# capturadas — que es el objetivo en una app de titiritero.
+#
+# Si algún modelo futuro sí anima falanges, esto se revierte añadiendo las
+# entradas Left/RightHand{Thumb,Index,Middle,Ring,Pinky}{1,2,3} → mismo nombre.
+FINGER_SUFFIXES = ("Thumb", "Index", "Middle", "Ring", "Pinky")
+
+
+def is_finger_bone(bone_name: str) -> bool:
+    """True si el hueso Mixamo es una falange (no se anima desde Kimodo)."""
+    return any(s in bone_name for s in FINGER_SUFFIXES)
 
 SMPLX22_TO_MIXAMO = {
     "pelvis": "Hips",
@@ -82,6 +96,18 @@ def mapping_for(joint_count: int) -> dict:
     if joint_count == 30:
         return {k: v for k, v in SOMA77_TO_MIXAMO.items() if k in _SOMA30_NAMES}
     raise ValueError(f"unsupported Kimodo joint count: {joint_count}")
+
+
+def prefixed_mapping(mapping: dict, prefix: str) -> dict:
+    """Aplica el prefijo del rig a los huesos Mixamo del mapa.
+
+    `mapping_for()` devuelve nombres SIN prefijo ("Hips"), pero un armature
+    Mixamo real los tiene con prefijo ("mixamorig:Hips"). Sin esto, ni un solo
+    hueso casaba y la generación no movía nada.
+    """
+    if not prefix:
+        return dict(mapping)
+    return {k: f"{prefix}{v}" for k, v in mapping.items()}
 
 
 def _hierarchy_order(bones: set, parent_of: dict) -> list:
@@ -146,12 +172,22 @@ def convert_motion(motion, joint_names, rest3, rest_pos, parent_of, mapping,
     # orden padre-antes-de-hijo según la jerarquía Mixamo
     order = _hierarchy_order(set(rest3.keys()), parent_of)
 
+    # Hueso raíz según el mapping (respeta el prefijo del rig).
+    root_bone = mapping.get("Hips") or mapping.get("pelvis")
+    if root_bone is None:
+        raise ValueError("el mapping no define un hueso raíz (Hips/pelvis)")
+
     rotations: dict = {}
     root: dict = {}
     for f in frames:
-        parent_world = None
+        # World 3x3 POR HUESO. Antes era una sola variable arrastrada sobre una
+        # lista ordenada por profundidad: al pasar de una rama a otra al mismo
+        # nivel (p.ej. Spine → LeftUpLeg, ambos hijos de Hips) el hueso heredaba
+        # la matriz de la rama anterior en vez de la de su padre.
+        world: dict = {}
         for b in order:
             parent = parent_of.get(b)
+            parent_world = world.get(parent) if parent is not None else None
             rest_arm = _rest_arm_3x3(b, rest3, parent, parent_world)
             j = b2j.get(b)
             if j is not None and f < T:
@@ -159,19 +195,26 @@ def convert_motion(motion, joint_names, rest3, rest_pos, parent_of, mapping,
                 r_k = Matrix((tuple(row[0]), tuple(row[1]), tuple(row[2])))
                 target_world = YUP_TO_ZUP @ r_k @ YUP_TO_ZUP.transposed()
                 basis3x3 = rest_arm.inverted() @ target_world
+                q = basis3x3.to_quaternion()
+                q.normalize()
+                rotations.setdefault(b, []).append((f, (q.w, q.x, q.y, q.z)))
             else:
+                # Hueso del rig sin joint Kimodo (dedos, huesos propios del rig):
+                # NO se emite canal. Antes se horneaba identidad, lo que metía
+                # fcurves constantes que pisan la animación existente de esos
+                # huesos al combinar tomas. Sí participa en la cadena.
                 basis3x3 = Matrix.Identity(3)
-            q = basis3x3.to_quaternion()
-            q.normalize()
-            rotations.setdefault(b, []).append((f, (q.w, q.x, q.y, q.z)))
-            parent_world = _chained_world(b, rest3, parent, parent_world, basis3x3)
+            world[b] = _chained_world(b, rest3, parent, parent_world, basis3x3)
 
         if apply_root and f < T:
             posbl = YUP_TO_ZUP @ Vector((rp[f, 0], rp[f, 1], rp[f, 2]))
-            h3 = rest3.get("Hips", Matrix.Identity(3))
-            head = rest_pos.get("Hips", Vector((0.0, 0.0, 0.0)))
+            # El hueso raíz sale del MAPPING, no de la constante "Hips": un
+            # rig Mixamo real usa el prefijo ("mixamorig:Hips") y hardcodear
+            # el nombre hacía que la traslación de raíz no se aplicara nunca.
+            h3 = rest3.get(root_bone, Matrix.Identity(3))
+            head = rest_pos.get(root_bone, Vector((0.0, 0.0, 0.0)))
             loc = h3.inverted() @ (posbl - head)
-            root.setdefault("Hips", []).append((f, (loc.x, loc.y, loc.z)))
+            root.setdefault(root_bone, []).append((f, (loc.x, loc.y, loc.z)))
 
     return rotations, root
 

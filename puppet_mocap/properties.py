@@ -285,6 +285,16 @@ class PuppetMocapProperties(bpy.types.PropertyGroup):
         min=0,
         max=60,
     )
+    kimodo_postprocess: bpy.props.BoolProperty(
+        name="Postprocess (anti foot-skate)",
+        description=(
+            "Activa el postprocesado de Kimodo, que limpia el deslizamiento de "
+            "pies (foot-skate). Requiere el paquete C++ 'motion_correction' "
+            "compilado con CMake en el venv de Kimodo; si no está, la "
+            "generación FALLA al final. Desactivado = los pies pueden patinar"
+        ),
+        default=False,
+    )
     kimodo_running: bpy.props.BoolProperty(
         name="Kimodo corriendo",
         default=False,

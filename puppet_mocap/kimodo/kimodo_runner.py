@@ -38,7 +38,7 @@ def _banner(msg):
 
 
 def main():
-    # --prompt, --duration, --model, --out, --seed, --no-postprocess, --num_transition_frames
+    # --prompt, --duration, --model, --out, --seed, --postprocess, --num_transition_frames
     argv = sys.argv
     def _val(name, default=None):
         if name in argv:
@@ -53,6 +53,7 @@ def main():
     out = _val("--out")
     seed = _val("--seed")
     ntf = _val("--num_transition_frames", "5")
+    postprocess = "--postprocess" in argv
 
     if not prompt or not out:
         print("[kimodo_runner] uso: --prompt <txt> --out <file.npz> [--model m] "
@@ -84,10 +85,15 @@ def main():
                 "--num_transition_frames", str(ntf)]
     if seed is not None:
         sys.argv += ["--seed", str(seed)]
-    # motion_correction (foot-skate C++) está FUERA de alcance (brief K2): sin
-    # --no-postprocess el postprocess pide el paquete C++ y falla. Siempre
-    # pasamos --no-postprocess (pérdida menor de calidad de foot-skate).
-    sys.argv += ["--no-postprocess"]
+    # El postprocess de Kimodo es lo que limpia el FOOT-SKATE (deslizamiento
+    # de pies), no un extra cosmético. Necesita el paquete C++ motion_correction,
+    # que requiere CMake y quedó fuera del build (SKIP_MOTION_CORRECTION_IN_SETUP).
+    # Default: desactivado, porque sin el paquete la generación FALLA al final.
+    # Con --postprocess se activa para quien sí lo tenga compilado.
+    if postprocess:
+        _banner("postprocess ACTIVADO (requiere el paquete C++ motion_correction)")
+    else:
+        sys.argv += ["--no-postprocess"]
 
     try:
         gen.main()
