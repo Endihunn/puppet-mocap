@@ -27,6 +27,7 @@ from .common import (
     lm_visibility,
     mp_to_arm,
     orient_yx,
+    smooth_scalar,
 )
 
 # --- MediaPipe Pose landmark indices --------------------------------------
@@ -88,8 +89,55 @@ def _advance(pb, q, parent_world):
     return chained_world_3x3(pb, q_eff, parent_world_3x3=parent_world)
 
 
+def _rig_torso_length(arm, prefix: str) -> float:
+    """Altura del torso del rig en rest pose (Hips→Spine2), en unidades locales."""
+    hips = arm.data.bones.get(f"{prefix}Hips")
+    spine2 = arm.data.bones.get(f"{prefix}Spine2")
+    if hips is None or spine2 is None:
+        return 0.0
+    return (spine2.head - hips.head).length
+
+
+def _apply_root_translation(arm, hips, mid_hip, observed_torso_len, torso_ok,
+                            prefix, root_scale):
+    """P2-4: traslada el Hips según el desplazamiento del mid-hip en arm-space.
+
+    La referencia se captura en la primera frame con la feature activa, para que
+    el rig se mueva RELATIVO a su posición actual y no salte a la posición
+    absoluta de la persona. Escala: automática (altura_rig_torso /
+    altura_observada_torso) × multiplicador manual `root_scale`."""
+    if hips is None:
+        return
+    ref = _state.get("root_hip_ref")
+    if ref is None:
+        _state["root_hip_ref"] = mid_hip.copy()
+        _state["root_loc_ref"] = Vector(hips.location)
+        return
+    root_loc_ref = _state.get("root_loc_ref")
+    if root_loc_ref is None:
+        root_loc_ref = Vector(hips.location)
+        _state["root_loc_ref"] = root_loc_ref
+
+    scale = float(root_scale)
+    if torso_ok and observed_torso_len > 1e-3:
+        rig_torso = _rig_torso_length(arm, prefix)
+        if rig_torso > 1e-3:
+            scale *= rig_torso / observed_torso_len
+
+    d = mid_hip - ref
+    # arm-space == armature-local (convención Mixamo estándar: +Z arriba,
+    # personaje mirando -Y, +X = izquierda anatómica).
+    loc = root_loc_ref + Vector((d.x, d.y, d.z)) * scale
+    hips.location = (
+        smooth_scalar("root_loc_x", loc.x),
+        smooth_scalar("root_loc_y", loc.y),
+        smooth_scalar("root_loc_z", loc.z),
+    )
+
+
 def apply(arm, landmarks, prefix: str = "mixamorig:",
-          min_vis: float = 0.5) -> int:
+          min_vis: float = 0.5, root_translation: bool = False,
+          root_scale: float = 1.0) -> int:
     """Aplica pose corporal con propagación de matrices frescas.
     Devuelve cuántos huesos movió."""
     if not landmarks or len(landmarks) < 33:
@@ -104,6 +152,7 @@ def apply(arm, landmarks, prefix: str = "mixamorig:",
     mid_hip      = (pts[LM_L_HIP] + pts[LM_R_HIP]) * 0.5
     mid_shoulder = (pts[LM_L_SHOULDER] + pts[LM_R_SHOULDER]) * 0.5
     torso = mid_shoulder - mid_hip
+    torso_len = torso.length
 
     hip_line = pts[LM_L_HIP] - pts[LM_R_HIP]
     shoulder_line = pts[LM_L_SHOULDER] - pts[LM_R_SHOULDER]
@@ -130,6 +179,9 @@ def apply(arm, landmarks, prefix: str = "mixamorig:",
             if q is not None:
                 moved += 1
         hips_world = _advance(hips, q, None)
+        if root_translation:
+            _apply_root_translation(arm, hips, mid_hip, torso_len, torso_ok,
+                                    prefix, root_scale)
 
     # --- Spine: twist distribuido cadera→hombros --------------------------
     parent_world = hips_world

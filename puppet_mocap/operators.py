@@ -32,7 +32,7 @@ _record_state = {
     "t0": 0.0,
     "fps": 30.0,
     "start_frame": 1,
-    "samples": [],         # list[(elapsed, {bone:(w,x,y,z)}, {shape:val})]
+    "samples": [],         # list[(elapsed, {bone:(w,x,y,z)}, {shape:val}, {bone:(x,y,z)})]
 }
 
 # Escena dueña de la captura (el timer NO debe leer bpy.context.scene: cambiar
@@ -324,21 +324,24 @@ def _bake_take(arm, samples, start_frame: int, fps: float):
     """Hornea el buffer de grabación a una action nueva ('PuppetTake').
     Devuelve (nombre_action, (frame_ini, frame_fin)) o None si no hubo datos."""
     frame_map = {}
-    for elapsed, bones, shapes in samples:
+    for elapsed, bones, shapes, locs in samples:
         f = start_frame + int(round(elapsed * fps))
-        frame_map[f] = (bones, shapes)  # colisión → gana el último sample
+        frame_map[f] = (bones, shapes, locs)  # colisión → gana el último sample
     if not frame_map:
         return None
     frames = sorted(frame_map)
 
     bone_tracks: dict = {}
     shape_tracks: dict = {}
+    loc_tracks: dict = {}
     for f in frames:
-        bones, shapes = frame_map[f]
+        bones, shapes, locs = frame_map[f]
         for name, q in bones.items():
             bone_tracks.setdefault(name, []).append((f, q))
         for name, v in shapes.items():
             shape_tracks.setdefault(name, []).append((f, v))
+        for name, v in locs.items():
+            loc_tracks.setdefault(name, []).append((f, v))
 
     # Continuidad de hemisferio: q y -q son la misma rotación, pero si la
     # curva salta de signo la interpolación LINEAR da vueltas locas.
@@ -354,13 +357,18 @@ def _bake_take(arm, samples, start_frame: int, fps: float):
 
     body_action = None
     face_action = None
-    if bone_tracks:
+    if bone_tracks or loc_tracks:
         channels = {}
         for name, pts in bone_tracks.items():
             esc = bpy.utils.escape_identifier(name)
             path = f'pose.bones["{esc}"].rotation_quaternion'
             for i in range(4):
                 channels[(path, i, name)] = [(f, q[i]) for f, q in pts]
+        for name, pts in loc_tracks.items():
+            esc = bpy.utils.escape_identifier(name)
+            path = f'pose.bones["{esc}"].location'
+            for i in range(3):
+                channels[(path, i, name)] = [(f, v[i]) for f, v in pts]
         body_action = _bake_channels(arm, "OBJECT", "PuppetTake", channels)
 
     if shape_tracks:
@@ -512,6 +520,8 @@ def _drain_tick():
                 enable_body=props.enable_body,
                 enable_hands=props.enable_hands,
                 enable_face=props.enable_face,
+                root_translation=props.enable_root_translation,
+                root_scale=props.root_translation_scale,
             )
         except Exception as e:
             # Mensaje corto para la UI; traceback al log con rate limit
@@ -527,8 +537,9 @@ def _drain_tick():
             if elapsed < 0.0:
                 continue  # llegó durante la cuenta regresiva
             snap = retarget.snapshot_pose(
-                arm, props.bone_prefix, include_body, include_hands, include_face)
-            st["samples"].append((elapsed, snap["bones"], snap["shapes"]))
+                arm, props.bone_prefix, include_body, include_hands, include_face,
+                include_root=props.enable_root_translation)
+            st["samples"].append((elapsed, snap["bones"], snap["shapes"], snap["locs"]))
             last_frame = st["start_frame"] + int(round(elapsed * st["fps"]))
 
     # P1-2: aplicar poses a 50 Hz, pero escribir contadores RNA + tag_redraw a

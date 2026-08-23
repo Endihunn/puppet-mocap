@@ -101,6 +101,9 @@ class PUPPET_PT_main(bpy.types.Panel):
         if props.enable_body:
             sub = box.column(align=True)
             sub.label(text="Pose + spine con twist + pies")
+            sub.prop(props, "enable_root_translation")
+            if props.enable_root_translation:
+                sub.prop(props, "root_translation_scale")
 
         # --- Módulos: Manos ---
         box = _module_box(layout, props, "Manos", "VIEW_PAN",

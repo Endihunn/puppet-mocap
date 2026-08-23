@@ -91,17 +91,24 @@ def _calibrate_hands_payload(hands_data, R):
 
 def snapshot_pose(arm, prefix: str,
                   include_body: bool, include_hands: bool,
-                  include_face: bool) -> dict:
-    """Lee las rotaciones recién aplicadas (y shape keys) para el buffer de
-    grabación. Tuplas planas — sin referencias RNA que se puedan invalidar."""
+                  include_face: bool, include_root: bool = False) -> dict:
+    """Lee las rotaciones recién aplicadas (y shape keys / Hips.location) para
+    el buffer de grabación. Tuplas planas — sin referencias RNA que se puedan
+    invalidar."""
     bones = {}
     for name in get_keyframe_bones(prefix, include_body, include_hands):
         pb = arm.pose.bones.get(name)
         if pb is not None:
             q = pb.rotation_quaternion
             bones[name] = (q.w, q.x, q.y, q.z)
+    locs = {}
+    if include_root and include_body:
+        pb = arm.pose.bones.get(f"{prefix}Hips")
+        if pb is not None:
+            l = pb.location
+            locs["Hips"] = (l.x, l.y, l.z)
     shapes = face.snapshot_values(arm) if include_face else {}
-    return {"bones": bones, "shapes": shapes}
+    return {"bones": bones, "shapes": shapes, "locs": locs}
 
 
 def apply_pose(landmarks=None, *, hands_data=None, face_data=None,
@@ -111,7 +118,8 @@ def apply_pose(landmarks=None, *, hands_data=None, face_data=None,
                mirror: bool = False, min_visibility: float = 0.5,
                calibrate: bool = True,
                enable_body: bool = True, enable_hands: bool = True,
-               enable_face: bool = False):
+               enable_face: bool = False,
+               root_translation: bool = False, root_scale: float = 1.0):
     """Aplica una pose dispatcheando a los módulos habilitados.
 
     Parámetros principales:
@@ -146,7 +154,9 @@ def apply_pose(landmarks=None, *, hands_data=None, face_data=None,
     if enable_body and landmarks:
         try:
             moved["body"] = body.apply(arm, landmarks, prefix=prefix,
-                                       min_vis=min_visibility)
+                                       min_vis=min_visibility,
+                                       root_translation=root_translation,
+                                       root_scale=root_scale)
         except Exception:
             log.exception("module=body apply failed")
 

@@ -180,6 +180,19 @@ class PuppetMocapProperties(bpy.types.PropertyGroup):
         description="Capturar y aplicar blendshapes faciales (requiere face_landmarker.task y un mesh con shape keys ARKit).",
         default=False,
     )
+    enable_root_translation: bpy.props.BoolProperty(
+        name="Traslación de raíz",
+        description="Traslada el Hips según el desplazamiento del mid-hip: el personaje se desplaza al caminar en vez de quedar clavado en el origen (P2-4). Requiere Cuerpo activo.",
+        default=False,
+    )
+    root_translation_scale: bpy.props.FloatProperty(
+        name="Escala de traslación",
+        description="Multiplicador manual sobre la escala automática (altura del rig / altura observada del torso). 1.0 = automático.",
+        default=1.0,
+        min=0.0,
+        max=10.0,
+        precision=2,
+    )
     record_body: bpy.props.BoolProperty(
         name="Grabar cuerpo",
         description="Insertar keyframes para huesos del cuerpo cuando se graba.",

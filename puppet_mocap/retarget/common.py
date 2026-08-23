@@ -431,6 +431,8 @@ def reset_smoothing():
     _state["kf_names"] = {}
     _state["arm_world_3x3"] = {}
     _state["auto_swap_active"] = False
+    _state["root_hip_ref"] = None
+    _state["root_loc_ref"] = None
 
 
 def set_tick(t: float, rotation_smooth: float):
