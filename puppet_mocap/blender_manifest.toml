@@ -1,0 +1,21 @@
+# Manifiesto de extensión Blender 4.2+ (P3-3). Convive con bl_info legacy:
+# el addon sigue instalándose vía "Install from Disk"; este manifest lo hace
+# compatible con el sistema de extensiones.
+schema_version = "1.0.0"
+
+id = "puppet_mocap"
+version = "0.4.0"
+name = "Puppet Mocap"
+tagline = "Mocap de webcam (MediaPipe) para armatures Mixamo"
+maintainer = "darth"
+type = "add-on"
+
+blender_version_min = "4.4.0"
+
+website = "https://github.com/Endihunn/puppet-mocap"
+
+tags = ["Animation", "Motion Capture"]
+
+permissions = ["network", "files"]
+
+description = "Webcam motion capture: MediaPipe (pose + manos + cara) -> armature Mixamo, en vivo y con grabación de tomas. MediaPipe corre en un proceso Python externo que manda JSON por TCP local."

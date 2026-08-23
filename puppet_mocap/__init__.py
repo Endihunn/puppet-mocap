@@ -6,7 +6,7 @@ Uso: View3D > N panel > pestaña Puppet Mocap
 bl_info = {
     "name": "Puppet Mocap",
     "author": "darth",
-    "version": (0, 3, 1),
+    "version": (0, 4, 0),
     "blender": (4, 4, 0),
     "location": "View3D > N Panel > Puppet Mocap",
     "description": "Mocap de webcam → armature Mixamo (cuerpo con twist de torso y pies + manos + cara vía MediaPipe en proceso externo; grabación buffer→bake; calibración de postura)",

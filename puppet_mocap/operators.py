@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 import time
@@ -68,10 +69,56 @@ def _face_model_path() -> Path:
     return _addon_dir() / "models" / "face_landmarker.task"
 
 
-FACE_MODEL_URL = (
-    "https://storage.googleapis.com/mediapipe-models/face_landmarker/"
-    "face_landmarker/float16/1/face_landmarker.task"
-)
+def _download_model(filename: str) -> tuple[bool, str]:
+    """Descarga un .task a models/ con timeout + .tmp + validación de tamaño +
+    os.replace atómico. Devuelve (ok, msg)."""
+    target = _addon_dir() / "models" / filename
+    if target.exists():
+        return True, "ya existe"
+    url = MODEL_URLS[filename]
+    tmp = target.with_suffix(".task.tmp")
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        # timeout + descarga a .tmp: sin esto una conexión colgada congelaba
+        # Blender indefinidamente y un corte dejaba un .task truncado que
+        # pasaba el check de exists().
+        with urllib.request.urlopen(url, timeout=20) as resp, open(tmp, "wb") as fh:
+            while True:
+                chunk = resp.read(65536)
+                if not chunk:
+                    break
+                fh.write(chunk)
+        size = tmp.stat().st_size
+        if size < 1024 * 1024:
+            tmp.unlink(missing_ok=True)
+            return False, f"descarga truncada ({size} bytes)"
+        os.replace(tmp, target)
+    except Exception as e:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return False, str(e)
+    return True, f"{target.stat().st_size / (1024 * 1024):.1f} MB"
+
+
+# Modelos MediaPipe descargables on demand (P3-2). URLs oficiales; los
+# tamaños coinciden con los .task que antes iban commiteados en models/.
+MODEL_URLS = {
+    "pose_landmarker_lite.task": (
+        "https://storage.googleapis.com/mediapipe-models/pose_landmarker/"
+        "pose_landmarker_lite/float16/1/pose_landmarker_lite.task"
+    ),
+    "hand_landmarker.task": (
+        "https://storage.googleapis.com/mediapipe-models/hand_landmarker/"
+        "hand_landmarker/float16/1/hand_landmarker.task"
+    ),
+    "face_landmarker.task": (
+        "https://storage.googleapis.com/mediapipe-models/face_landmarker/"
+        "face_landmarker/float16/1/face_landmarker.task"
+    ),
+}
+
 
 
 def _sync_target(props):
@@ -585,7 +632,7 @@ class PUPPET_OT_start_capture(bpy.types.Operator):
             model = _model_path()
             if not model.exists():
                 log.error(f"modelo de pose no encontrado: {model}")
-                self.report({"ERROR"}, f"pose_landmarker_lite.task no encontrado: {model}")
+                self.report({"ERROR"}, "pose_landmarker_lite.task no encontrado. Usa 'Descargar modelos'.")
                 return {"CANCELLED"}
             cmd.extend(["--model", str(model)])
 
@@ -595,9 +642,9 @@ class PUPPET_OT_start_capture(bpy.types.Operator):
                 cmd.extend(["--hand-model", str(hand_model)])
             elif props.enable_body or props.enable_face:
                 log.warn(f"hand_landmarker.task no encontrado: {hand_model}")
-                self.report({"WARNING"}, "hand_landmarker.task no encontrado, captura sin manos")
+                self.report({"WARNING"}, "hand_landmarker.task no encontrado, captura sin manos. Usa 'Descargar modelos'.")
             else:
-                self.report({"ERROR"}, "hand_landmarker.task no encontrado y Manos es el único módulo")
+                self.report({"ERROR"}, "hand_landmarker.task no encontrado y Manos es el único módulo. Usa 'Descargar modelos'.")
                 return {"CANCELLED"}
 
         if props.enable_face:
@@ -608,11 +655,11 @@ class PUPPET_OT_start_capture(bpy.types.Operator):
                 log.warn(f"face_landmarker.task no encontrado: {face_model}")
                 self.report(
                     {"WARNING"},
-                    "face_landmarker.task no encontrado. Usa el botón 'Descargar modelo de cara'.",
+                    "face_landmarker.task no encontrado. Usa el botón 'Descargar modelos'.",
                 )
             else:
                 self.report({"ERROR"},
-                            "face_landmarker.task no encontrado. Usa 'Descargar modelo de cara'.")
+                            "face_landmarker.task no encontrado. Usa 'Descargar modelos'.")
                 return {"CANCELLED"}
 
         # Un proceso previo vivo (start fallido anterior) se quedaría huérfano
@@ -849,6 +896,17 @@ class PUPPET_OT_detect_prefix(bpy.types.Operator):
         return {"CANCELLED"}
 
 
+# Mínimo conocido-bueno de MediaPipe: la Tasks API (PoseLandmarker/
+# HandLandmarker/FaceLandmarker con *_world_landmarks y output_face_blendshapes)
+# existe desde 0.10.0; versiones anteriores no traen esos campos (P3-5).
+MIN_MEDIAPIPE = (0, 10, 0)
+
+
+def _version_tuple(v: str) -> tuple:
+    """'0.10.14' / '0.10.14.dev0' → (0, 10, 14)."""
+    return tuple(int(n) for n in re.findall(r"\d+", v)[:3])
+
+
 class PUPPET_OT_check_deps(bpy.types.Operator):
     bl_idname = "puppet_mocap.check_deps"
     bl_label = "Verificar dependencias"
@@ -875,6 +933,15 @@ class PUPPET_OT_check_deps(bpy.types.Operator):
             return {"CANCELLED"}
         if r.returncode == 0 and "|" in r.stdout:
             mp_v, cv_v, np_v = r.stdout.strip().splitlines()[-1].split("|")
+            if _version_tuple(mp_v) < MIN_MEDIAPIPE:
+                props.deps_status = (
+                    f"mediapipe {mp_v} DEMASIADO viejo (mínimo "
+                    f"{'.'.join(map(str, MIN_MEDIAPIPE))}). Actualiza: "
+                    f"py -m pip install -U mediapipe"
+                )
+                log.error(f"deps check: {props.deps_status}")
+                self.report({"ERROR"}, props.deps_status)
+                return {"CANCELLED"}
             props.deps_status = f"OK — mediapipe {mp_v}, cv2 {cv_v}, numpy {np_v}"
             log.info(f"deps: {props.deps_status}")
             self.report({"INFO"}, props.deps_status)
@@ -915,46 +982,27 @@ class PUPPET_OT_open_log(bpy.types.Operator):
         return {"FINISHED"}
 
 
-class PUPPET_OT_download_face_model(bpy.types.Operator):
-    bl_idname = "puppet_mocap.download_face_model"
-    bl_label = "Descargar modelo de cara"
-    bl_description = "Descarga face_landmarker.task de MediaPipe (~3.5 MB) a la carpeta models/ del addon"
+class PUPPET_OT_download_models(bpy.types.Operator):
+    bl_idname = "puppet_mocap.download_models"
+    bl_label = "Descargar modelos"
+    bl_description = "Descarga los modelos MediaPipe que falten (pose + manos + cara) a la carpeta models/ del addon"
 
     def execute(self, context):
-        target = _face_model_path()
-        if target.exists():
-            self.report({"INFO"}, f"Ya existe: {target}")
+        missing = [f for f in MODEL_URLS if not (_addon_dir() / "models" / f).exists()]
+        if not missing:
+            self.report({"INFO"}, "Todos los modelos ya están descargados")
             return {"CANCELLED"}
-        tmp = target.with_suffix(".task.tmp")
-        try:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            log.info(f"descargando face_landmarker desde {FACE_MODEL_URL}")
-            # timeout + descarga a .tmp: sin esto una conexión colgada
-            # congelaba Blender indefinidamente y un corte dejaba un .task
-            # truncado que pasaba el check de exists()
-            with urllib.request.urlopen(FACE_MODEL_URL, timeout=20) as resp, \
-                    open(tmp, "wb") as fh:
-                while True:
-                    chunk = resp.read(65536)
-                    if not chunk:
-                        break
-                    fh.write(chunk)
-            size = tmp.stat().st_size
-            if size < 1024 * 1024:
-                tmp.unlink(missing_ok=True)
-                raise OSError(f"descarga truncada ({size} bytes)")
-            os.replace(tmp, target)
-        except Exception as e:
-            try:
-                tmp.unlink(missing_ok=True)
-            except OSError:
-                pass
-            log.exception("download face model")
-            self.report({"ERROR"}, f"Falló descarga: {e}")
-            return {"CANCELLED"}
-        size_mb = target.stat().st_size / (1024 * 1024)
-        log.info(f"face model descargado ({size_mb:.1f} MB) en {target}")
-        self.report({"INFO"}, f"Modelo de cara descargado ({size_mb:.1f} MB)")
+        results = []
+        for filename in missing:
+            log.info(f"descargando {filename} ...")
+            ok, msg = _download_model(filename)
+            if ok:
+                log.info(f"{filename} descargado ({msg})")
+                results.append(f"{filename} ✓")
+            else:
+                log.error(f"{filename} falló: {msg}")
+                results.append(f"{filename} ✗ ({msg})")
+        self.report({"INFO"}, "Modelos: " + "; ".join(results))
         return {"FINISHED"}
 
 
@@ -986,5 +1034,5 @@ CLASSES = (
     PUPPET_OT_check_deps,
     PUPPET_OT_open_log,
     PUPPET_OT_clear_log,
-    PUPPET_OT_download_face_model,
+    PUPPET_OT_download_models,
 )

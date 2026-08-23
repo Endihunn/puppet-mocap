@@ -9,7 +9,8 @@ from .retarget import face as face_mod
 
 # Cache de checks de filesystem (exists/stat en cada redraw suman en escenas
 # pesadas — el panel se redibuja continuamente durante la captura)
-_fs_cache = {"t": 0.0, "face_model": False, "log_kb": None}
+_fs_cache = {"t": 0.0, "face_model": False, "pose_model": False,
+            "hand_model": False, "log_kb": None}
 
 
 def _fs_state(ops_mod):
@@ -17,6 +18,8 @@ def _fs_state(ops_mod):
     if now - _fs_cache["t"] > 2.0:
         _fs_cache["t"] = now
         _fs_cache["face_model"] = ops_mod._face_model_path().exists()
+        _fs_cache["pose_model"] = ops_mod._model_path().exists()
+        _fs_cache["hand_model"] = ops_mod._hand_model_path().exists()
         try:
             p = Path(log.get_log_path())
             _fs_cache["log_kb"] = p.stat().st_size / 1024 if p.exists() else None
@@ -114,7 +117,7 @@ class PUPPET_PT_main(bpy.types.Panel):
             sub = box.column(align=True)
             if not fs["face_model"]:
                 sub.label(text="face_landmarker.task no descargado", icon="ERROR")
-                sub.operator("puppet_mocap.download_face_model", icon="IMPORT")
+                sub.operator("puppet_mocap.download_models", icon="IMPORT")
             else:
                 # usa el cache del retarget en vez de re-escanear la escena;
                 # una sola llamada reutilizando el objeto (P1-1)
@@ -210,6 +213,16 @@ class PUPPET_PT_main(bpy.types.Panel):
         box.label(text="Diagnóstico", icon="CONSOLE")
         col = box.column(align=True)
         col.operator("puppet_mocap.check_deps", icon="CHECKMARK")
+        missing_models = []
+        if not fs["pose_model"]:
+            missing_models.append("pose")
+        if not fs["hand_model"]:
+            missing_models.append("manos")
+        if not fs["face_model"]:
+            missing_models.append("cara")
+        if missing_models:
+            col.label(text=f"Modelos faltantes: {', '.join(missing_models)}", icon="ERROR")
+            col.operator("puppet_mocap.download_models", icon="IMPORT")
         if props.deps_status:
             icon = "CHECKMARK" if props.deps_status.startswith("OK") else "ERROR"
             col.label(text=props.deps_status, icon=icon)
