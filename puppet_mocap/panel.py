@@ -281,6 +281,16 @@ class PUPPET_PT_main(bpy.types.Panel):
             else:
                 col.prop(props, "kimodo_prompt")
                 col.prop(props, "kimodo_duration")
+                if props.kimodo_duration > 10.0:
+                    col.label(
+                        text=f"Duración {props.kimodo_duration:.0f}s > 10s (máx. de ",
+                        icon="ERROR",
+                    )
+                    col.label(
+                        text="entrenamiento del modelo): trocea el prompt en segmentos",
+                        icon="ERROR",
+                    )
+                col.prop(props, "kimodo_num_transition")
                 col.prop(props, "kimodo_model")
                 r2 = col.row(align=True)
                 r2.prop(props, "kimodo_seed")
