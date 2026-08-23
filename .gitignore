@@ -1,3 +1,13 @@
 desktop.ini
 .env
 *.log
+
+# releases / bundles are artifacts, not commits
+*.zip
+
+# MediaPipe models are downloaded on demand (PUPPET_OT_download_models)
+*.task
+
+# Python caches
+__pycache__/
+*.pyc

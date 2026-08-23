@@ -1,0 +1,910 @@
+"""Operators de Puppet Mocap."""
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+import time
+import urllib.request
+from pathlib import Path
+
+import bpy
+from bpy.app.handlers import persistent
+
+from . import log, retarget, server
+
+
+# Subprocess + log file handle (no son serializables, no caben en PropertyGroup)
+_subprocess_state = {"proc": None, "log_fh": None}
+
+# Estado de grabación. NO vive en PropertyGroup: los RNA floats son float32 y
+# un epoch (~1.78e9) pierde ±64 s de precisión — la grabación entera salía
+# corrida de frames. Aquí son floats de Python de 64 bits.
+_record_state = {
+    "pending": False,      # cuenta regresiva corriendo
+    "active": False,       # insertando samples
+    "t_pending_end": 0.0,
+    "t0": 0.0,
+    "fps": 30.0,
+    "start_frame": 1,
+    "samples": [],         # list[(elapsed, {bone:(w,x,y,z)}, {shape:val})]
+}
+
+# Escena dueña de la captura (el timer NO debe leer bpy.context.scene: cambiar
+# de escena a media captura intercambiaba todos los settings en silencio)
+_capture_state = {"scene": None}
+
+# Rate-limit de errores de apply_pose (cada uno loguea traceback a disco)
+_err_state = {"n": 0, "t": 0.0}
+
+# Recolección de calibración de postura (el drain junta ~1.5 s de landmarks)
+_calib_state = {"collecting": False, "until": 0.0, "buf": []}
+
+
+def _addon_dir() -> Path:
+    return Path(__file__).resolve().parent
+
+
+def _capture_runner_path() -> Path:
+    return _addon_dir() / "capture" / "capture_runner.py"
+
+
+def _model_path() -> Path:
+    return _addon_dir() / "models" / "pose_landmarker_lite.task"
+
+
+def _hand_model_path() -> Path:
+    return _addon_dir() / "models" / "hand_landmarker.task"
+
+
+def _face_model_path() -> Path:
+    return _addon_dir() / "models" / "face_landmarker.task"
+
+
+FACE_MODEL_URL = (
+    "https://storage.googleapis.com/mediapipe-models/face_landmarker/"
+    "face_landmarker/float16/1/face_landmarker.task"
+)
+
+
+def _sync_target(props):
+    """Propaga el armature elegido en la UI al estado del retarget."""
+    obj = props.target_armature
+    retarget.set_target_armature(obj.name if obj is not None else None)
+
+
+def _load_calibration(props):
+    """props (float32, persistente) → common._state (Matrix)."""
+    from mathutils import Matrix
+    if props.calib_valid:
+        v = props.calib_matrix
+        retarget.common._state["calib_R"] = Matrix((
+            (v[0], v[1], v[2]), (v[3], v[4], v[5]), (v[6], v[7], v[8])))
+    else:
+        retarget.common._state["calib_R"] = None
+
+
+def _store_calibration(props, R):
+    if R is None:
+        props.calib_valid = False
+    else:
+        props.calib_matrix = (R[0][0], R[0][1], R[0][2],
+                              R[1][0], R[1][1], R[1][2],
+                              R[2][0], R[2][1], R[2][2])
+        props.calib_valid = True
+    retarget.common._state["calib_R"] = R
+
+
+def _close_capture_log():
+    fh = _subprocess_state.get("log_fh")
+    if fh is not None:
+        try:
+            fh.flush()
+            fh.close()
+        except Exception:
+            log.exception("cerrando log handle del subprocess")
+    _subprocess_state["log_fh"] = None
+
+
+def _terminate_subprocess():
+    proc = _subprocess_state.get("proc")
+    if proc is not None and proc.poll() is None:
+        try:
+            proc.terminate()
+            try:
+                rc = proc.wait(timeout=2.0)
+                log.info(f"subprocess terminó con rc={rc}")
+            except subprocess.TimeoutExpired:
+                log.warn("subprocess no respondió a terminate; killing")
+                proc.kill()
+        except Exception:
+            log.exception("cerrando subprocess de captura")
+    _subprocess_state["proc"] = None
+    _close_capture_log()
+
+
+def _reset_runtime_props(props):
+    props.server_running = False
+    props.capture_pid = 0
+
+
+def _cleanup_capture(props=None, *, unregister_timer: bool = True):
+    """Apaga todo: subprocess, server, timer. Compartido por stop_capture,
+    el watchdog del timer, unregister() y el handler de load_pre."""
+    _terminate_subprocess()
+    server.stop()
+    _record_state.update(pending=False, active=False, samples=[])
+    _calib_state.update(collecting=False, buf=[])
+    _capture_state["scene"] = None
+    if props is not None:
+        _reset_runtime_props(props)
+    if unregister_timer and bpy.app.timers.is_registered(_drain_timer):
+        try:
+            bpy.app.timers.unregister(_drain_timer)
+        except Exception:
+            pass
+
+
+@persistent
+def _on_load_pre(*_args):
+    """File > Open a media captura: sin esto, el timer persistente seguía
+    retargeteando la webcam sobre el primer armature del archivo NUEVO."""
+    try:
+        log.info("load_pre: apagando captura")
+        _cleanup_capture(None)
+    except Exception:
+        pass
+
+
+def register_handlers():
+    if _on_load_pre not in bpy.app.handlers.load_pre:
+        bpy.app.handlers.load_pre.append(_on_load_pre)
+
+
+def unregister_handlers():
+    if _on_load_pre in bpy.app.handlers.load_pre:
+        bpy.app.handlers.load_pre.remove(_on_load_pre)
+
+
+def _tag_redraw_ui():
+    """El N-panel no se redibuja solo desde un timer: sin esto, los contadores
+    parecían congelados mientras el usuario actuaba lejos del mouse."""
+    wm = bpy.context.window_manager
+    if wm is None:
+        return
+    for window in wm.windows:
+        for area in window.screen.areas:
+            if area.type == "VIEW_3D":
+                for region in area.regions:
+                    if region.type == "UI":
+                        region.tag_redraw()
+
+
+# --- Bake (buffer → fcurves) -----------------------------------------------
+
+def _bake_channels(id_data, id_type: str, name: str, channels: dict):
+    """channels: {(data_path, index, group|None): [(frame, value), ...]}.
+    API de slotted actions (Blender 4.4+; en 5.x action.fcurves ya no existe).
+    foreach_set es órdenes de magnitud más rápido que keyframe_insert."""
+    action = bpy.data.actions.new(name)
+    ad = id_data.animation_data
+    if ad is None:
+        ad = id_data.animation_data_create()
+    if ad.action is not None:
+        # Nunca destruir la toma anterior — fake_user la preserva en el archivo
+        ad.action.use_fake_user = True
+    ad.action = action
+    slot = action.slots.new(id_type=id_type, name=getattr(id_data, "name", "Slot"))
+    ad.action_slot = slot
+    layer = action.layers.new("Base")
+    strip = layer.strips.new(type="KEYFRAME")
+    cb = strip.channelbag(slot, ensure=True)
+    groups = {}
+    for (data_path, index, group), pts in channels.items():
+        if not pts:
+            continue
+        fc = cb.fcurves.new(data_path, index=index)
+        if group:
+            g = groups.get(group)
+            if g is None:
+                g = cb.groups.new(group)
+                groups[group] = g
+            fc.group = g
+        n = len(pts)
+        fc.keyframe_points.add(n)
+        flat = []
+        for f, v in pts:
+            flat.append(float(f))
+            flat.append(float(v))
+        fc.keyframe_points.foreach_set("co", flat)
+        fc.keyframe_points.foreach_set("interpolation", [1] * n)  # 1 = LINEAR
+        fc.update()
+    return action
+
+
+def _bake_take(arm, samples, start_frame: int, fps: float):
+    """Hornea el buffer de grabación a una action nueva ('PuppetTake').
+    Devuelve (nombre_action, (frame_ini, frame_fin)) o None si no hubo datos."""
+    frame_map = {}
+    for elapsed, bones, shapes in samples:
+        f = start_frame + int(round(elapsed * fps))
+        frame_map[f] = (bones, shapes)  # colisión → gana el último sample
+    if not frame_map:
+        return None
+    frames = sorted(frame_map)
+
+    bone_tracks: dict = {}
+    shape_tracks: dict = {}
+    for f in frames:
+        bones, shapes = frame_map[f]
+        for name, q in bones.items():
+            bone_tracks.setdefault(name, []).append((f, q))
+        for name, v in shapes.items():
+            shape_tracks.setdefault(name, []).append((f, v))
+
+    # Continuidad de hemisferio: q y -q son la misma rotación, pero si la
+    # curva salta de signo la interpolación LINEAR da vueltas locas.
+    for name, pts in bone_tracks.items():
+        prev = None
+        fixed = []
+        for f, q in pts:
+            if prev is not None and sum(a * b for a, b in zip(prev, q)) < 0.0:
+                q = tuple(-c for c in q)
+            fixed.append((f, q))
+            prev = q
+        bone_tracks[name] = fixed
+
+    if bone_tracks:
+        channels = {}
+        for name, pts in bone_tracks.items():
+            path = f'pose.bones["{name}"].rotation_quaternion'
+            for i in range(4):
+                channels[(path, i, name)] = [(f, q[i]) for f, q in pts]
+        _bake_channels(arm, "OBJECT", "PuppetTake", channels)
+
+    if shape_tracks:
+        mesh = retarget.face.get_cached_mesh(arm)
+        if mesh is not None:
+            channels = {
+                (f'key_blocks["{name}"].value', 0, None): pts
+                for name, pts in shape_tracks.items()
+            }
+            _bake_channels(mesh.data.shape_keys, "KEY", "PuppetTake_cara", channels)
+
+    return "PuppetTake", (frames[0], frames[-1])
+
+
+def _finish_recording(scene, props):
+    """Cierra la grabación (si había) y hornea el buffer. Seguro de llamar
+    aunque no se estuviera grabando."""
+    st = _record_state
+    was_active = st["active"] and st["samples"]
+    props.is_recording = False
+    result = None
+    if was_active:
+        arm = retarget.get_armature()
+        if arm is not None:
+            try:
+                result = _bake_take(arm, st["samples"], st["start_frame"], st["fps"])
+            except Exception:
+                log.exception("bake de la toma")
+        if result is not None:
+            _name, (f0, f1) = result
+            scene.frame_end = max(scene.frame_end, f1)
+            scene.frame_current = st["start_frame"]
+            log.info(f"toma horneada: frames {f0}-{f1} "
+                     f"({len(st['samples'])} samples @ {st['fps']:.3g} fps)")
+    st.update(pending=False, active=False, samples=[])
+    return result
+
+
+# --- Timer de drenado -------------------------------------------------------
+
+def _drain_timer():
+    """Llamado por bpy.app.timers para drenar la queue de poses."""
+    try:
+        return _drain_tick()
+    except Exception:
+        # Un tick que truena no debe matar el timer (el subprocess sigue
+        # mandando); loguea y reintenta.
+        log.exception("drain timer")
+        return 0.1
+
+
+def _drain_tick():
+    if not server.is_running():
+        return None  # unregister
+    scene = None
+    if _capture_state["scene"]:
+        scene = bpy.data.scenes.get(_capture_state["scene"])
+    if scene is None:
+        scene = bpy.context.scene
+    if scene is None:
+        return 0.1
+    props = scene.puppet_mocap
+    now = time.time()
+
+    # Watchdog: el subprocess murió (deps faltantes, webcam ocupada, usuario
+    # cerró la ventana). Antes esto era un "esperando cliente..." eterno.
+    proc = _subprocess_state.get("proc")
+    if proc is not None and proc.poll() is not None:
+        rc = proc.returncode
+        reasons = {
+            0: "ventana de captura cerrada",
+            1: "faltan dependencias o modelo (revisa el log: botón Abrir Log)",
+            2: "webcam ocupada o inexistente",
+        }
+        props.last_error = f"Captura terminó: {reasons.get(rc, f'código {rc}')}"
+        log.warn(f"subprocess murió rc={rc}; apagando captura")
+        _finish_recording(scene, props)
+        _cleanup_capture(props, unregister_timer=False)
+        _tag_redraw_ui()
+        return None
+
+    st = _record_state
+    if props.is_recording and st["pending"] and now >= st["t_pending_end"]:
+        st.update(pending=False, active=True, t0=now, samples=[])
+        log.info(f"REC activo @ frame {st['start_frame']}")
+    recording = props.is_recording and st["active"]
+
+    msgs = []
+    while len(msgs) < 60:
+        try:
+            msgs.append(server.POSE_QUEUE.get_nowait())
+        except Exception:
+            break
+    pose_msgs = [m for m in msgs if m.get("t") == "pose"]
+
+    # Recolección de calibración de postura. El timeout se evalúa AUNQUE no
+    # lleguen mensajes — si el stream se corta a media recolección, el estado
+    # "Capturando..." no debe quedarse pegado.
+    cal = _calib_state
+    if cal["collecting"]:
+        for m in pose_msgs:
+            if m.get("lm"):
+                cal["buf"].append(m["lm"])
+        if now >= cal["until"]:
+            cal["collecting"] = False
+            R = retarget.compute_calibration(cal["buf"])
+            cal["buf"] = []
+            if R is None:
+                props.last_error = "Calibración falló: no vi tu pose (¿cuerpo completo en cámara?)"
+                log.warn("calibración sin datos suficientes")
+            else:
+                _store_calibration(props, R)
+                props.last_error = ""
+                log.info(f"calibración capturada: {R!r}")
+            _tag_redraw_ui()
+
+    if not pose_msgs:
+        return 0.02
+
+    # En vivo solo importa la pose más reciente — aplicar todo el backlog
+    # tras un hiccup del viewport era una espiral de stutter. Grabando sí se
+    # aplican todas (cada una cae en un frame distinto).
+    apply_list = pose_msgs if recording else pose_msgs[-1:]
+
+    include_body = props.enable_body and props.record_body
+    include_hands = props.enable_hands and props.record_hands
+    include_face = props.enable_face and props.record_face
+    last_frame = None
+    arm = retarget.get_armature()
+
+    for m in apply_list:
+        try:
+            retarget.apply_pose(
+                landmarks=m.get("lm"),
+                hands_data=m.get("hands"),
+                face_data=m.get("face"),
+                prefix=props.bone_prefix,
+                swap_hands=props.swap_hands,
+                flip_palm_normal=props.flip_palm_normal,
+                rotation_smooth=props.rotation_smooth,
+                mirror=props.mirror_motion,
+                min_visibility=props.min_visibility,
+                calibrate=props.use_calibration,
+                enable_body=props.enable_body,
+                enable_hands=props.enable_hands,
+                enable_face=props.enable_face,
+            )
+        except Exception as e:
+            # Mensaje corto para la UI; traceback al log con rate limit
+            props.last_error = f"apply_pose: {e}"
+            _err_state["n"] += 1
+            if _err_state["n"] <= 3 or now - _err_state["t"] > 5.0:
+                _err_state["t"] = now
+                log.exception(f"apply_pose falló (#{_err_state['n']})")
+            continue
+
+        if recording and arm is not None:
+            elapsed = m.get("_rx", now) - st["t0"]
+            if elapsed < 0.0:
+                continue  # llegó durante la cuenta regresiva
+            snap = retarget.snapshot_pose(
+                arm, props.bone_prefix, include_body, include_hands, include_face)
+            st["samples"].append((elapsed, snap["bones"], snap["shapes"]))
+            last_frame = st["start_frame"] + int(round(elapsed * st["fps"]))
+
+    props.frames_received += len(pose_msgs)
+    if last_frame is not None:
+        props.last_record_frame = last_frame
+        # frame_current directo NO fuerza la evaluación completa del depsgraph
+        # (frame_set sí, y costaba 5-30 ms por mensaje — la grabación era una
+        # presentación de diapositivas)
+        scene.frame_current = last_frame
+    _tag_redraw_ui()
+    return 0.02
+
+
+# --- Operators ---------------------------------------------------------------
+
+class PUPPET_OT_start_capture(bpy.types.Operator):
+    bl_idname = "puppet_mocap.start_capture"
+    bl_label = "Iniciar Captura"
+    bl_description = "Arranca el servidor TCP y lanza el proceso externo de webcam + MediaPipe"
+
+    def execute(self, context):
+        props = context.scene.puppet_mocap
+        if server.is_running():
+            self.report({"WARNING"}, "El server ya está corriendo")
+            return {"CANCELLED"}
+
+        log.banner(f"START CAPTURE port={props.server_port} cam={props.cam_index}")
+
+        if not (props.enable_body or props.enable_hands or props.enable_face):
+            self.report({"ERROR"}, "Activa al menos un módulo (Cuerpo/Manos/Cara)")
+            return {"CANCELLED"}
+
+        _sync_target(props)
+        _load_calibration(props)
+        arm = retarget.get_armature()
+        if arm is None:
+            log.error("Sin armature al iniciar captura")
+            self.report({"ERROR"}, "No hay un armature en la escena. Importa un FBX Mixamo primero.")
+            return {"CANCELLED"}
+
+        # Validación de prefijo: un mismatch dejaba el rig quieto en silencio
+        expected = retarget.get_keyframe_bones(
+            props.bone_prefix,
+            include_body=props.enable_body,
+            include_hands=props.enable_hands,
+        )
+        if expected:
+            matched = sum(1 for n in expected if n in arm.pose.bones)
+            props.bones_matched = matched
+            props.bones_total = len(expected)
+            if matched == 0:
+                hint = ""
+                for bone in arm.data.bones:
+                    if bone.name.endswith("Hips"):
+                        hint = f" ¿Prefijo correcto: '{bone.name[:-4]}'? Usa 'Detectar prefijo'."
+                        break
+                self.report({"ERROR"},
+                            f"Ningún hueso coincide con el prefijo '{props.bone_prefix}'.{hint}")
+                return {"CANCELLED"}
+            if matched < len(expected):
+                self.report({"WARNING"},
+                            f"Solo {matched}/{len(expected)} huesos coinciden con el prefijo")
+
+        retarget.fix_orientation(prefix=props.bone_prefix)
+
+        runner = _capture_runner_path()
+        if not runner.exists():
+            log.error(f"capture_runner no encontrado: {runner}")
+            self.report({"ERROR"}, f"capture_runner no encontrado: {runner}")
+            return {"CANCELLED"}
+
+        cmd = [
+            props.python_path,
+            str(runner),
+            "--addon-port", str(props.server_port),
+            "--cam", str(props.cam_index),
+            "--fps", str(props.send_fps),
+            "--smooth-min-cutoff", str(props.smooth_min_cutoff),
+            "--smooth-beta", str(props.smooth_beta),
+        ]
+
+        # El pose model también ancla las muñecas para las manos: manos sin
+        # cuerpo antes enviaba exactamente CERO datos, en silencio.
+        if props.enable_body or props.enable_hands:
+            model = _model_path()
+            if not model.exists():
+                log.error(f"modelo de pose no encontrado: {model}")
+                self.report({"ERROR"}, f"pose_landmarker_lite.task no encontrado: {model}")
+                return {"CANCELLED"}
+            cmd.extend(["--model", str(model)])
+
+        if props.enable_hands:
+            hand_model = _hand_model_path()
+            if hand_model.exists():
+                cmd.extend(["--hand-model", str(hand_model)])
+            elif props.enable_body or props.enable_face:
+                log.warn(f"hand_landmarker.task no encontrado: {hand_model}")
+                self.report({"WARNING"}, "hand_landmarker.task no encontrado, captura sin manos")
+            else:
+                self.report({"ERROR"}, "hand_landmarker.task no encontrado y Manos es el único módulo")
+                return {"CANCELLED"}
+
+        if props.enable_face:
+            face_model = _face_model_path()
+            if face_model.exists():
+                cmd.extend(["--face-model", str(face_model)])
+            elif props.enable_body or props.enable_hands:
+                log.warn(f"face_landmarker.task no encontrado: {face_model}")
+                self.report(
+                    {"WARNING"},
+                    "face_landmarker.task no encontrado. Usa el botón 'Descargar modelo de cara'.",
+                )
+            else:
+                self.report({"ERROR"},
+                            "face_landmarker.task no encontrado. Usa 'Descargar modelo de cara'.")
+                return {"CANCELLED"}
+
+        # Un proceso previo vivo (start fallido anterior) se quedaría huérfano
+        # con la webcam tomada
+        _terminate_subprocess()
+
+        ok, err = server.start(props.server_port)
+        if not ok:
+            log.error(f"Server.start falló: {err}")
+            self.report({"ERROR"}, f"No se pudo iniciar el server: {err}")
+            return {"CANCELLED"}
+
+        log.info(f"subprocess cmd: {' '.join(cmd)}")
+
+        # Redirigir stdout/stderr del subprocess al mismo log para diagnóstico
+        try:
+            log_fh = open(log.get_log_path(), "ab")
+            _subprocess_state["log_fh"] = log_fh
+        except OSError:
+            log.exception("no pude abrir log para subprocess; continuando sin captura de stdout")
+            log_fh = None
+
+        env = dict(os.environ)
+        # Callar el spam por-frame de absl/TF en el log compartido
+        env.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
+        env.setdefault("GLOG_minloglevel", "2")
+
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=log_fh if log_fh is not None else subprocess.DEVNULL,
+                stderr=subprocess.STDOUT if log_fh is not None else subprocess.DEVNULL,
+                cwd=str(_addon_dir()),
+                env=env,
+            )
+        except FileNotFoundError:
+            server.stop()
+            _close_capture_log()
+            log.error(f"Python externo no encontrado: {props.python_path}")
+            self.report({"ERROR"}, f"Python no encontrado: {props.python_path}")
+            return {"CANCELLED"}
+        except Exception as e:
+            server.stop()
+            _close_capture_log()
+            log.exception("subprocess.Popen falló")
+            self.report({"ERROR"}, f"No se pudo lanzar capture: {e}")
+            return {"CANCELLED"}
+
+        _subprocess_state["proc"] = proc
+        _capture_state["scene"] = context.scene.name
+        props.capture_pid = proc.pid
+        props.server_running = True
+        props.frames_received = 0
+        props.last_error = ""
+        log.info(f"subprocess lanzado PID={proc.pid} "
+                 f"prefix='{props.bone_prefix}' smooth={props.rotation_smooth} "
+                 f"mirror={props.mirror_motion}")
+
+        if not bpy.app.timers.is_registered(_drain_timer):
+            bpy.app.timers.register(_drain_timer, first_interval=0.1, persistent=True)
+
+        self.report({"INFO"}, f"Captura iniciada (PID {proc.pid})")
+        return {"FINISHED"}
+
+
+class PUPPET_OT_stop_capture(bpy.types.Operator):
+    bl_idname = "puppet_mocap.stop_capture"
+    bl_label = "Detener Captura"
+    bl_description = "Detiene el server y el proceso externo de captura (hornea la grabación pendiente)"
+
+    def execute(self, context):
+        props = context.scene.puppet_mocap
+        log.info("stop_capture")
+        result = _finish_recording(context.scene, props)
+        _cleanup_capture(props)
+        log.banner("END CAPTURE")
+        if result is not None:
+            _name, (f0, f1) = result
+            self.report({"INFO"}, f"Captura detenida; toma horneada ({f0}-{f1})")
+        else:
+            self.report({"INFO"}, "Captura detenida")
+        return {"FINISHED"}
+
+
+class PUPPET_OT_toggle_record(bpy.types.Operator):
+    bl_idname = "puppet_mocap.toggle_record"
+    bl_label = "Toggle Record"
+    bl_description = "Empieza o detiene la grabación (con cuenta regresiva; hornea al detener)"
+
+    def execute(self, context):
+        props = context.scene.puppet_mocap
+        scene = context.scene
+        if props.is_recording:
+            result = _finish_recording(scene, props)
+            if result is not None:
+                _name, (f0, f1) = result
+                log.info(f"REC stop; toma {f0}-{f1}")
+                self.report({"INFO"}, f"Toma grabada: frames {f0}-{f1} (action 'PuppetTake')")
+            else:
+                self.report({"INFO"}, "Grabación cancelada (sin datos)")
+            return {"FINISHED"}
+
+        if not server.is_running():
+            self.report({"ERROR"}, "Inicia la captura antes de grabar")
+            return {"CANCELLED"}
+
+        if props.use_scene_fps:
+            fps = scene.render.fps / scene.render.fps_base
+        else:
+            fps = props.rec_fps
+        now = time.time()
+        countdown = float(props.rec_countdown)
+        _record_state.update(
+            pending=countdown > 0.0,
+            active=countdown <= 0.0,
+            t_pending_end=now + countdown,
+            t0=now + countdown,
+            fps=fps,
+            start_frame=max(1, scene.frame_current),
+            samples=[],
+        )
+        props.is_recording = True
+        props.rec_start_frame = _record_state["start_frame"]
+        props.last_record_frame = _record_state["start_frame"]
+        log.info(f"REC armado @ frame {_record_state['start_frame']} "
+                 f"fps={fps:.3g} countdown={countdown:.0f}s")
+        if countdown > 0:
+            self.report({"INFO"}, f"Grabando en {props.rec_countdown} s...")
+        else:
+            self.report({"INFO"}, f"Grabación iniciada @ frame {_record_state['start_frame']}")
+        return {"FINISHED"}
+
+
+class PUPPET_OT_clear_keyframes(bpy.types.Operator):
+    bl_idname = "puppet_mocap.clear_keyframes"
+    bl_label = "Borrar Keyframes"
+    bl_description = "Elimina la action del armature Y la animación facial (shape keys)"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        _sync_target(context.scene.puppet_mocap)
+        if retarget.clear_all_keyframes():
+            log.info("keyframes borrados (cuerpo + cara)")
+            self.report({"INFO"}, "Keyframes borrados")
+            return {"FINISHED"}
+        log.warn("clear_keyframes: sin armature")
+        self.report({"ERROR"}, "No hay armature en la escena")
+        return {"CANCELLED"}
+
+
+class PUPPET_OT_reset_rig(bpy.types.Operator):
+    bl_idname = "puppet_mocap.reset_rig"
+    bl_label = "Reset Rig"
+    bl_description = "Resetea el armature a rest pose y los shape keys a 0 (no borra actions)"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        props = context.scene.puppet_mocap
+        _sync_target(props)
+        if retarget.fix_orientation(force=True, prefix=props.bone_prefix):
+            retarget.face.zero_values(retarget.get_armature())
+            log.info(f"rig reseteado prefix='{props.bone_prefix}'")
+            self.report({"INFO"}, "Rig reseteado a rest pose")
+            return {"FINISHED"}
+        log.warn("reset_rig: sin armature")
+        self.report({"ERROR"}, "No hay armature en la escena")
+        return {"CANCELLED"}
+
+
+class PUPPET_OT_calibrate(bpy.types.Operator):
+    bl_idname = "puppet_mocap.calibrate"
+    bl_label = "Calibrar postura"
+    bl_description = ("Párate derecho, de frente a la cámara, y presiona: captura ~1.5 s "
+                      "de tu pose neutral y corrige la inclinación de la cámara y tu orientación")
+
+    def execute(self, context):
+        props = context.scene.puppet_mocap
+        if not server.is_running() or not server.is_client_connected():
+            self.report({"ERROR"}, "Inicia la captura (y espera al cliente) antes de calibrar")
+            return {"CANCELLED"}
+        _calib_state.update(collecting=True, until=time.time() + 1.5, buf=[])
+        log.info("calibración: recolectando 1.5 s de pose neutral")
+        self.report({"INFO"}, "Calibrando... quédate quieto 2 segundos")
+        return {"FINISHED"}
+
+
+class PUPPET_OT_clear_calibration(bpy.types.Operator):
+    bl_idname = "puppet_mocap.clear_calibration"
+    bl_label = "Borrar calibración"
+    bl_description = "Descarta la corrección de postura capturada"
+
+    def execute(self, context):
+        props = context.scene.puppet_mocap
+        _store_calibration(props, None)
+        _calib_state.update(collecting=False, buf=[])
+        log.info("calibración borrada")
+        self.report({"INFO"}, "Calibración borrada")
+        return {"FINISHED"}
+
+
+class PUPPET_OT_detect_prefix(bpy.types.Operator):
+    bl_idname = "puppet_mocap.detect_prefix"
+    bl_label = "Detectar prefijo"
+    bl_description = "Deduce el prefijo de huesos del armature (busca el hueso *Hips)"
+
+    def execute(self, context):
+        props = context.scene.puppet_mocap
+        _sync_target(props)
+        arm = retarget.get_armature()
+        if arm is None:
+            self.report({"ERROR"}, "No hay armature en la escena")
+            return {"CANCELLED"}
+        for bone in arm.data.bones:
+            if bone.name.endswith("Hips"):
+                prefix = bone.name[: -len("Hips")]
+                props.bone_prefix = prefix
+                expected = retarget.get_keyframe_bones(
+                    prefix,
+                    include_body=props.enable_body,
+                    include_hands=props.enable_hands,
+                )
+                if expected:
+                    matched = sum(1 for n in expected if n in arm.pose.bones)
+                    props.bones_matched = matched
+                    props.bones_total = len(expected)
+                    self.report({"INFO"},
+                                f"Prefijo: '{prefix}' ({matched}/{len(expected)} huesos)")
+                else:
+                    self.report({"INFO"}, f"Prefijo: '{prefix}'")
+                return {"FINISHED"}
+        self.report({"ERROR"}, "No encontré un hueso que termine en 'Hips'")
+        return {"CANCELLED"}
+
+
+class PUPPET_OT_check_deps(bpy.types.Operator):
+    bl_idname = "puppet_mocap.check_deps"
+    bl_label = "Verificar dependencias"
+    bl_description = "Comprueba que el Python externo tenga mediapipe + opencv + numpy"
+
+    def execute(self, context):
+        props = context.scene.puppet_mocap
+        cmd = [
+            props.python_path, "-c",
+            "import mediapipe, cv2, numpy; "
+            "print(mediapipe.__version__ + '|' + cv2.__version__ + '|' + numpy.__version__)",
+        ]
+        flags = 0x08000000 if sys.platform == "win32" else 0  # CREATE_NO_WINDOW
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True,
+                               timeout=30, creationflags=flags)
+        except FileNotFoundError:
+            props.deps_status = f"Python no encontrado: {props.python_path}"
+            self.report({"ERROR"}, props.deps_status)
+            return {"CANCELLED"}
+        except subprocess.TimeoutExpired:
+            props.deps_status = "Timeout verificando (¿antivirus bloqueando?)"
+            self.report({"ERROR"}, props.deps_status)
+            return {"CANCELLED"}
+        if r.returncode == 0 and "|" in r.stdout:
+            mp_v, cv_v, np_v = r.stdout.strip().splitlines()[-1].split("|")
+            props.deps_status = f"OK — mediapipe {mp_v}, cv2 {cv_v}, numpy {np_v}"
+            log.info(f"deps: {props.deps_status}")
+            self.report({"INFO"}, props.deps_status)
+            return {"FINISHED"}
+        err_line = (r.stderr or "").strip().splitlines()
+        detail = err_line[-1] if err_line else f"código {r.returncode}"
+        props.deps_status = f"FALTAN dependencias: {detail}"
+        log.error(f"deps check: {detail}")
+        self.report({"ERROR"}, props.deps_status)
+        return {"CANCELLED"}
+
+
+class PUPPET_OT_open_log(bpy.types.Operator):
+    bl_idname = "puppet_mocap.open_log"
+    bl_label = "Abrir Log"
+    bl_description = "Abre el archivo de log de Puppet Mocap con la app por defecto del sistema"
+
+    def execute(self, context):
+        path = log.get_log_path()
+        if not Path(path).exists():
+            self.report({"WARNING"}, f"Log aún no existe: {path}")
+            return {"CANCELLED"}
+        try:
+            if sys.platform == "win32":
+                os.startfile(path)
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", path])
+            else:
+                subprocess.Popen(["xdg-open", path])
+        except Exception as e:
+            log.exception("open_log")
+            self.report({"ERROR"}, f"No pude abrir el log: {e}")
+            return {"CANCELLED"}
+        self.report({"INFO"}, f"Abriendo {path}")
+        return {"FINISHED"}
+
+
+class PUPPET_OT_download_face_model(bpy.types.Operator):
+    bl_idname = "puppet_mocap.download_face_model"
+    bl_label = "Descargar modelo de cara"
+    bl_description = "Descarga face_landmarker.task de MediaPipe (~3.5 MB) a la carpeta models/ del addon"
+
+    def execute(self, context):
+        target = _face_model_path()
+        if target.exists():
+            self.report({"INFO"}, f"Ya existe: {target}")
+            return {"CANCELLED"}
+        tmp = target.with_suffix(".task.tmp")
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            log.info(f"descargando face_landmarker desde {FACE_MODEL_URL}")
+            # timeout + descarga a .tmp: sin esto una conexión colgada
+            # congelaba Blender indefinidamente y un corte dejaba un .task
+            # truncado que pasaba el check de exists()
+            with urllib.request.urlopen(FACE_MODEL_URL, timeout=20) as resp, \
+                    open(tmp, "wb") as fh:
+                while True:
+                    chunk = resp.read(65536)
+                    if not chunk:
+                        break
+                    fh.write(chunk)
+            size = tmp.stat().st_size
+            if size < 1024 * 1024:
+                tmp.unlink(missing_ok=True)
+                raise OSError(f"descarga truncada ({size} bytes)")
+            os.replace(tmp, target)
+        except Exception as e:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            log.exception("download face model")
+            self.report({"ERROR"}, f"Falló descarga: {e}")
+            return {"CANCELLED"}
+        size_mb = target.stat().st_size / (1024 * 1024)
+        log.info(f"face model descargado ({size_mb:.1f} MB) en {target}")
+        self.report({"INFO"}, f"Modelo de cara descargado ({size_mb:.1f} MB)")
+        return {"FINISHED"}
+
+
+class PUPPET_OT_clear_log(bpy.types.Operator):
+    bl_idname = "puppet_mocap.clear_log"
+    bl_label = "Limpiar Log"
+    bl_description = "Trunca el archivo de log para empezar limpio"
+
+    def execute(self, context):
+        # unlink() fallaba SIEMPRE en Windows (el FileHandler tiene el archivo
+        # abierto) — truncar en sitio sí funciona
+        if not log.clear():
+            self.report({"ERROR"}, "No pude truncar el log")
+            return {"CANCELLED"}
+        log.info("log limpiado por el usuario")
+        self.report({"INFO"}, "Log limpiado")
+        return {"FINISHED"}
+
+
+CLASSES = (
+    PUPPET_OT_start_capture,
+    PUPPET_OT_stop_capture,
+    PUPPET_OT_toggle_record,
+    PUPPET_OT_clear_keyframes,
+    PUPPET_OT_reset_rig,
+    PUPPET_OT_calibrate,
+    PUPPET_OT_clear_calibration,
+    PUPPET_OT_detect_prefix,
+    PUPPET_OT_check_deps,
+    PUPPET_OT_open_log,
+    PUPPET_OT_clear_log,
+    PUPPET_OT_download_face_model,
+)

@@ -1,0 +1,214 @@
+"""PropertyGroup de Puppet Mocap (settings y estado runtime)."""
+import bpy
+
+
+def _poll_armature(self, obj):
+    return obj.type == "ARMATURE"
+
+
+class PuppetMocapProperties(bpy.types.PropertyGroup):
+    # Estado runtime (no se persiste a través de file save porque OPTIONS={'SKIP_SAVE'})
+    server_running: bpy.props.BoolProperty(
+        name="Server Running",
+        default=False,
+        options={"SKIP_SAVE"},
+    )
+    is_recording: bpy.props.BoolProperty(
+        name="Recording",
+        default=False,
+        options={"SKIP_SAVE"},
+    )
+    # OJO: el t0 de grabación vive en operators._record_state (dict Python).
+    # NO usar FloatProperty para epoch time: RNA floats son float32 y a
+    # ~1.78e9 el ULP es 128 s → el mapeo tiempo→frame salía hasta ±64 s mal.
+    rec_start_frame: bpy.props.IntProperty(
+        name="Record Start Frame",
+        default=1,
+        options={"SKIP_SAVE"},
+    )
+    last_record_frame: bpy.props.IntProperty(
+        name="Last Record Frame",
+        default=0,
+        options={"SKIP_SAVE"},
+    )
+    frames_received: bpy.props.IntProperty(
+        name="Frames Received",
+        default=0,
+        options={"SKIP_SAVE"},
+    )
+    capture_pid: bpy.props.IntProperty(
+        name="Capture PID",
+        default=0,
+        options={"SKIP_SAVE"},
+    )
+    last_error: bpy.props.StringProperty(
+        name="Last Error",
+        default="",
+        options={"SKIP_SAVE"},
+    )
+    deps_status: bpy.props.StringProperty(
+        name="Estado de dependencias",
+        default="",
+        options={"SKIP_SAVE"},
+    )
+    bones_matched: bpy.props.IntProperty(
+        name="Huesos coincidentes",
+        default=-1,  # -1 = sin validar
+        options={"SKIP_SAVE"},
+    )
+    bones_total: bpy.props.IntProperty(
+        name="Huesos esperados",
+        default=0,
+        options={"SKIP_SAVE"},
+    )
+
+    # Settings persistidos
+    target_armature: bpy.props.PointerProperty(
+        name="Armature",
+        description="Armature objetivo. Vacío = auto (primer armature de la escena)",
+        type=bpy.types.Object,
+        poll=_poll_armature,
+    )
+    mirror_motion: bpy.props.BoolProperty(
+        name="Modo espejo",
+        description="Espeja todo el movimiento (cuerpo y manos): levantas la derecha y el personaje que te encara levanta SU izquierda, como un espejo. Coincide con el preview de la webcam",
+        default=False,
+    )
+    min_visibility: bpy.props.FloatProperty(
+        name="Visibilidad mínima",
+        description="Umbral de visibilidad de MediaPipe Pose para aplicar un hueso (0.5 = default de Google). Landmarks por debajo mantienen la pose anterior en vez de meter basura",
+        default=0.5,
+        min=0.0,
+        max=1.0,
+        subtype="FACTOR",
+    )
+    use_calibration: bpy.props.BoolProperty(
+        name="Usar calibración",
+        description="Aplica la corrección de postura capturada con 'Calibrar' (inclinación de la cámara + orientación neutral tuya)",
+        default=True,
+    )
+    calib_valid: bpy.props.BoolProperty(
+        name="Calibración válida",
+        default=False,
+    )
+    calib_matrix: bpy.props.FloatVectorProperty(
+        name="Matriz de calibración",
+        description="Rotación arm-space que endereza la pose neutral capturada (row-major)",
+        size=9,
+        default=(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0),
+    )
+    use_scene_fps: bpy.props.BoolProperty(
+        name="Usar FPS de escena",
+        description="Mapear tiempo→frame con el FPS de render de la escena (evita que la grabación se reproduzca a otra velocidad)",
+        default=True,
+    )
+    rec_countdown: bpy.props.IntProperty(
+        name="Cuenta regresiva",
+        description="Segundos de espera al presionar Grabar antes de insertar keyframes (te da tiempo de ponerte en posición)",
+        default=3,
+        min=0,
+        max=10,
+    )
+    cam_index: bpy.props.IntProperty(
+        name="Cámara",
+        description="Índice de la cámara (0 = default)",
+        default=0,
+        min=0,
+        max=8,
+    )
+    send_fps: bpy.props.FloatProperty(
+        name="FPS envío",
+        description="Frames por segundo enviados a Blender (en vivo)",
+        default=20.0,
+        min=5.0,
+        max=60.0,
+    )
+    rec_fps: bpy.props.FloatProperty(
+        name="FPS grabación",
+        description="FPS usado para mapear tiempo→frame al grabar",
+        default=30.0,
+        min=10.0,
+        max=120.0,
+    )
+    smooth_min_cutoff: bpy.props.FloatProperty(
+        name="Landmark cutoff",
+        description="One Euro Filter min_cutoff sobre landmarks (Hz). Más bajo = menos jitter en quietos, más lag",
+        default=1.0,
+        min=0.05,
+        max=10.0,
+    )
+    smooth_beta: bpy.props.FloatProperty(
+        name="Landmark β",
+        description="One Euro Filter beta sobre landmarks. Más alto = filtro afloja más rápido cuando hay movimiento",
+        default=0.05,
+        min=0.0,
+        max=1.0,
+    )
+    rotation_smooth: bpy.props.FloatProperty(
+        name="Suavizado de rotación",
+        description="Filtro One Euro a nivel cuaternión por hueso. 0=bypass, 0.5=normal, 1=muy lento. Sube esto si el rig tiembla",
+        default=0.5,
+        min=0.0,
+        max=1.0,
+        subtype="FACTOR",
+    )
+    # --- Toggles de módulos ---
+    enable_body: bpy.props.BoolProperty(
+        name="Cuerpo",
+        description="Capturar y aplicar pose corporal (brazos, piernas, hips, cuello, cabeza).",
+        default=True,
+    )
+    enable_hands: bpy.props.BoolProperty(
+        name="Manos",
+        description="Capturar y aplicar orientación de muñecas y dedos.",
+        default=True,
+    )
+    enable_face: bpy.props.BoolProperty(
+        name="Cara",
+        description="Capturar y aplicar blendshapes faciales (requiere face_landmarker.task y un mesh con shape keys ARKit).",
+        default=False,
+    )
+    record_body: bpy.props.BoolProperty(
+        name="Grabar cuerpo",
+        description="Insertar keyframes para huesos del cuerpo cuando se graba.",
+        default=True,
+    )
+    record_hands: bpy.props.BoolProperty(
+        name="Grabar manos",
+        description="Insertar keyframes para huesos de manos/dedos cuando se graba.",
+        default=True,
+    )
+    record_face: bpy.props.BoolProperty(
+        name="Grabar cara",
+        description="Insertar keyframes para shape keys faciales cuando se graba.",
+        default=True,
+    )
+
+    flip_palm_normal: bpy.props.BoolProperty(
+        name="Invertir normal de palma",
+        description="Escape hatch: invierte el normal de la palma. Útil si tu rig usa una convención de roll opuesta a Mixamo estándar.",
+        default=False,
+    )
+    swap_hands: bpy.props.BoolProperty(
+        name="Intercambiar L↔R",
+        description="Intercambia los datos de las manos izquierda y derecha si el etiquetado de MediaPipe no coincide con tu setup de cámara.",
+        default=False,
+    )
+    python_path: bpy.props.StringProperty(
+        name="Python externo",
+        description="Ruta al python.exe (donde está MediaPipe instalado). 'py' usa el launcher de Windows.",
+        default="py",
+        subtype="FILE_PATH",
+    )
+    bone_prefix: bpy.props.StringProperty(
+        name="Prefijo de Huesos",
+        description="Prefijo de los huesos del rig (ej: 'mixamorig:'). Si el rig no se mueve, verifica este nombre.",
+        default="mixamorig:",
+    )
+    server_port: bpy.props.IntProperty(
+        name="Puerto",
+        description="Puerto TCP del addon",
+        default=9878,
+        min=1024,
+        max=65535,
+    )
