@@ -23,6 +23,10 @@ import time
 from pathlib import Path
 
 LOG_PATH = Path(tempfile.gettempdir()) / "puppet_mocap.log"
+# Log separado para el stdout/stderr del subprocess de captura (P1-3): dos
+# handles independientes sobre el MISMO archivo entrelazaban líneas a media y
+# "Limpiar Log" truncaba mientras el subprocess aún escribía.
+CAPTURE_LOG_PATH = Path(tempfile.gettempdir()) / "puppet_mocap_capture.log"
 _MAX_LOG_BYTES = 5 * 1024 * 1024  # rota si supera 5 MB
 
 _logger: logging.Logger | None = None
@@ -30,6 +34,10 @@ _logger: logging.Logger | None = None
 
 def get_log_path() -> str:
     return str(LOG_PATH)
+
+
+def get_capture_log_path() -> str:
+    return str(CAPTURE_LOG_PATH)
 
 
 class _FlushingFileHandler(logging.FileHandler):
@@ -93,9 +101,13 @@ def _setup() -> logging.Logger:
     except OSError as e:
         sys.stderr.write(f"[puppet_mocap] No pude abrir log {LOG_PATH}: {e}\n")
 
-    sh = logging.StreamHandler(sys.stdout)
-    sh.setFormatter(fmt)
-    lg.addHandler(sh)
+    # P1-4: en Blender GUI en Windows sys.stdout puede ser None; StreamHandler
+    # caería a sys.stderr (también None) y emit() lanzaría AttributeError en
+    # cada registro.
+    if sys.stdout is not None:
+        sh = logging.StreamHandler(sys.stdout)
+        sh.setFormatter(fmt)
+        lg.addHandler(sh)
 
     _logger = lg
     # Marcar que el logger ya está armado, en log y en consola
@@ -133,10 +145,11 @@ def banner(msg: str) -> None:
 
 
 def clear() -> bool:
-    """Trunca el log EN SITIO. En Windows unlink() falla mientras el
-    FileHandler (o el subprocess de captura) tenga el archivo abierto —
-    truncar a través del handle propio siempre funciona."""
+    """Trunca el log principal Y el del subprocess EN SITIO. En Windows
+    unlink() falla mientras un handle tenga el archivo abierto — truncar a
+    través de un handle propio siempre funciona."""
     lg = _setup()
+    ok = False
     for h in lg.handlers:
         if isinstance(h, logging.FileHandler):
             try:
@@ -145,15 +158,23 @@ def clear() -> bool:
                     if h.stream is not None:
                         h.stream.seek(0)
                         h.stream.truncate()
+                        ok = True
                 finally:
                     h.release()
-                return True
             except (OSError, ValueError):
                 pass
-    # Fallback: truncar con un handle nuevo (modo 'w' comparte con 'a')
+    # Log del subprocess (handle separado, no gestionado por logging).
     try:
-        with open(LOG_PATH, "w", encoding="utf-8"):
+        with open(CAPTURE_LOG_PATH, "w", encoding="utf-8"):
             pass
-        return True
     except OSError:
-        return False
+        pass
+    # Fallback: truncar con un handle nuevo (modo 'w' comparte con 'a')
+    if not ok:
+        try:
+            with open(LOG_PATH, "w", encoding="utf-8"):
+                pass
+            ok = True
+        except OSError:
+            pass
+    return ok

@@ -7,6 +7,8 @@ las manejamos directamente.
 """
 from __future__ import annotations
 
+import time
+
 import bpy
 
 from .. import log
@@ -43,6 +45,10 @@ ARKIT_SHAPES = (
 )
 
 ARKIT_SHAPES_LOWER = frozenset(s.lower() for s in ARKIT_SHAPES)
+
+# TTL del cache NEGATIVO de find_face_mesh (P1-1): sin mesh, el panel
+# redibujaba a ~50 Hz y cada redraw era un escaneo completo de la escena.
+_FACE_MISS_TTL = 2.0
 
 
 def _is_arkit_name(name: str) -> bool:
@@ -95,7 +101,8 @@ def find_face_mesh(arm):
 def get_cached_mesh(arm):
     """Mesh facial cacheado en _state — find_face_mesh escanea TODOS los
     objetos del archivo, hacerlo por frame costaba ms en escenas grandes.
-    Se invalida en reset_smoothing() (cada start/reset)."""
+    Se invalida en reset_smoothing() (cada start/reset). El FALLO también se
+    cachea con TTL (P1-1)."""
     name = _state.get("face_mesh_name")
     if name is not None:
         obj = bpy.data.objects.get(name)
@@ -103,10 +110,17 @@ def get_cached_mesh(arm):
             return obj
         _state["face_mesh_name"] = None
         _state["face_key_map"] = None
+    last_miss = _state.get("face_mesh_miss_t", 0.0)
+    now = time.monotonic()
+    if last_miss and now - last_miss < _FACE_MISS_TTL:
+        return None
     mesh = find_face_mesh(arm)
     if mesh is not None:
         _state["face_mesh_name"] = mesh.name
         _state["face_key_map"] = None
+        _state["face_mesh_miss_t"] = 0.0
+    else:
+        _state["face_mesh_miss_t"] = now
     return mesh
 
 
@@ -175,9 +189,9 @@ def snapshot_values(arm) -> dict:
     return out
 
 
-def shape_key_names_in_mesh(arm) -> list[str]:
+def shape_key_names_in_mesh(arm, mesh=None) -> list[str]:
     """Nombres de los shape keys ARKit presentes en el mesh."""
-    mesh = get_cached_mesh(arm)
+    mesh = mesh if mesh is not None else get_cached_mesh(arm)
     if mesh is None:
         return []
     return list(_key_map(mesh).values())

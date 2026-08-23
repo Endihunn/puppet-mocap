@@ -427,6 +427,7 @@ def reset_smoothing():
     _state["palm_diag_Right"] = False
     _state["face_mesh_name"] = None
     _state["face_key_map"] = None
+    _state["face_mesh_miss_t"] = 0.0
     _state["kf_names"] = {}
     _state["arm_world_3x3"] = {}
     _state["auto_swap_active"] = False

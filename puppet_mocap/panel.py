@@ -116,13 +116,15 @@ class PUPPET_PT_main(bpy.types.Panel):
                 sub.label(text="face_landmarker.task no descargado", icon="ERROR")
                 sub.operator("puppet_mocap.download_face_model", icon="IMPORT")
             else:
-                # usa el cache del retarget en vez de re-escanear la escena
+                # usa el cache del retarget en vez de re-escanear la escena;
+                # una sola llamada reutilizando el objeto (P1-1)
                 from .retarget import get_armature
-                mesh = face_mod.get_cached_mesh(get_armature())
+                arm = get_armature()
+                mesh = face_mod.get_cached_mesh(arm)
                 if mesh is None:
                     sub.label(text="No hay mesh con shape keys ARKit", icon="ERROR")
                 else:
-                    n_arkit = len(face_mod.shape_key_names_in_mesh(get_armature()))
+                    n_arkit = len(face_mod.shape_key_names_in_mesh(arm, mesh))
                     sub.label(
                         text=f"Mesh: {mesh.name} ({n_arkit}/52 ARKit)",
                         icon="MESH_DATA",

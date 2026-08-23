@@ -41,6 +41,9 @@ _capture_state = {"scene": None}
 # Rate-limit de errores de apply_pose (cada uno loguea traceback a disco)
 _err_state = {"n": 0, "t": 0.0}
 
+# Pulso lento (~10 Hz) para contadores RNA + redraw de UI (P1-2)
+_ui_pulse_state = {"last": 0.0, "pending_frames": 0, "pending_last_frame": None}
+
 # Recolección de calibración de postura (el drain junta ~1.5 s de landmarks)
 _calib_state = {"collecting": False, "until": 0.0, "buf": []}
 
@@ -481,14 +484,26 @@ def _drain_tick():
             st["samples"].append((elapsed, snap["bones"], snap["shapes"]))
             last_frame = st["start_frame"] + int(round(elapsed * st["fps"]))
 
-    props.frames_received += len(pose_msgs)
+    # P1-2: aplicar poses a 50 Hz, pero escribir contadores RNA + tag_redraw a
+    # ~10 Hz (cada escritura de IntProperty taggea el depsgraph y el redraw por
+    # tick era trabajo puro desperdiciado). `scene.frame_current` se mantiene
+    # por tick durante la grabación (disparador del scrub, no un contador).
+    _ui_pulse_state["pending_frames"] += len(pose_msgs)
     if last_frame is not None:
-        props.last_record_frame = last_frame
+        _ui_pulse_state["pending_last_frame"] = last_frame
         # frame_current directo NO fuerza la evaluación completa del depsgraph
         # (frame_set sí, y costaba 5-30 ms por mensaje — la grabación era una
         # presentación de diapositivas)
         scene.frame_current = last_frame
-    _tag_redraw_ui()
+    if now - _ui_pulse_state["last"] >= 0.1:
+        _ui_pulse_state["last"] = now
+        if _ui_pulse_state["pending_frames"]:
+            props.frames_received += _ui_pulse_state["pending_frames"]
+            _ui_pulse_state["pending_frames"] = 0
+        if _ui_pulse_state["pending_last_frame"] is not None:
+            props.last_record_frame = _ui_pulse_state["pending_last_frame"]
+            _ui_pulse_state["pending_last_frame"] = None
+        _tag_redraw_ui()
     return 0.02
 
 
@@ -612,16 +627,17 @@ class PUPPET_OT_start_capture(bpy.types.Operator):
 
         log.info(f"subprocess cmd: {' '.join(cmd)}")
 
-        # Redirigir stdout/stderr del subprocess al mismo log para diagnóstico
+        # Redirigir stdout/stderr del subprocess a un log SEPARADO (P1-3): dos
+        # handles sobre el mismo archivo entrelazaban líneas a media línea.
         try:
-            log_fh = open(log.get_log_path(), "ab")
+            log_fh = open(log.get_capture_log_path(), "ab")
             _subprocess_state["log_fh"] = log_fh
         except OSError:
-            log.exception("no pude abrir log para subprocess; continuando sin captura de stdout")
+            log.exception("no pude abrir log del subprocess; continuando sin captura de stdout")
             log_fh = None
 
         env = dict(os.environ)
-        # Callar el spam por-frame de absl/TF en el log compartido
+        # Callar el spam por-frame de absl/TF en el log del subprocess
         env.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
         env.setdefault("GLOG_minloglevel", "2")
 
@@ -652,6 +668,7 @@ class PUPPET_OT_start_capture(bpy.types.Operator):
         props.server_running = True
         props.frames_received = 0
         props.last_error = ""
+        _ui_pulse_state.update(last=0.0, pending_frames=0, pending_last_frame=None)
         log.info(f"subprocess lanzado PID={proc.pid} "
                  f"prefix='{props.bone_prefix}' smooth={props.rotation_smooth} "
                  f"mirror={props.mirror_motion}")
@@ -876,22 +893,25 @@ class PUPPET_OT_open_log(bpy.types.Operator):
     bl_description = "Abre el archivo de log de Puppet Mocap con la app por defecto del sistema"
 
     def execute(self, context):
-        path = log.get_log_path()
-        if not Path(path).exists():
-            self.report({"WARNING"}, f"Log aún no existe: {path}")
+        # P1-3: abrir tanto el log del addon como el del subprocess.
+        paths = [log.get_log_path(), log.get_capture_log_path()]
+        existing = [p for p in paths if Path(p).exists()]
+        if not existing:
+            self.report({"WARNING"}, "Log aún no existe")
             return {"CANCELLED"}
         try:
-            if sys.platform == "win32":
-                os.startfile(path)
-            elif sys.platform == "darwin":
-                subprocess.Popen(["open", path])
-            else:
-                subprocess.Popen(["xdg-open", path])
+            for path in existing:
+                if sys.platform == "win32":
+                    os.startfile(path)
+                elif sys.platform == "darwin":
+                    subprocess.Popen(["open", path])
+                else:
+                    subprocess.Popen(["xdg-open", path])
         except Exception as e:
             log.exception("open_log")
             self.report({"ERROR"}, f"No pude abrir el log: {e}")
             return {"CANCELLED"}
-        self.report({"INFO"}, f"Abriendo {path}")
+        self.report({"INFO"}, f"Abriendo {len(existing)} log(s)")
         return {"FINISHED"}
 
 

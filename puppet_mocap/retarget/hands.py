@@ -211,6 +211,21 @@ def _orient_forearm_from_palm(arm, bone_side: str, body_landmarks,
     return chained_world_3x3(fa, q_fa, parent_world_3x3=arm_world)
 
 
+def _hand_matches_body_side(lms, body_landmarks, bone_side) -> bool:
+    """True si la muñeca de la mano está más cerca de la muñeca del cuerpo de
+    `bone_side` que de la opuesta — i.e. los landmarks del cuerpo corresponden
+    al mismo brazo que esta mano. Sustituye al viejo `data_side == bone_side`,
+    que se apagaba en silencio tras el auto-swap correctivo (P1-5)."""
+    wrist_idx = _BODY_ELBOW_WRIST[bone_side][1]  # 15 Left / 16 Right
+    other_idx = 16 if wrist_idx == 15 else 15
+    if not lms or len(body_landmarks) <= other_idx:
+        return False
+    hand_wrist = mp_to_arm(lms[0])
+    b_wrist = mp_to_arm(body_landmarks[wrist_idx])
+    b_other = mp_to_arm(body_landmarks[other_idx])
+    return (hand_wrist - b_wrist).length < (hand_wrist - b_other).length
+
+
 def _dump_hand_axes_once(arm, prefix: str):
     """Loguea los ejes locales del Hand al primer apply para debug."""
     if _state.get("last_axis_dump"):
@@ -236,17 +251,16 @@ def _apply_one_hand(arm, data_side: str, bone_side: str, lms,
                     body_landmarks=None, handedness: str | None = None) -> int:
     """Aplica una mano al rig.
 
-    `data_side` = chiralidad anatómica del lado físico de donde viene el dato
-        (Left/Right). Determina el signo del cross-product en `_palm_basis`:
-        para la mano izquierda física, cross(idx-wrist, pinky-wrist) ya apunta
-        al dorso; para la derecha hay que negarlo. Ese parámetro NO debe
-        cambiar al hacer swap.
+    `data_side` = clave del cache de histéresis por lado en `_palm_basis` (el
+        signo palma/dorso lo decide `handedness`, no este parámetro). Debe
+        seguir a la entrada para no mezclar el estado de histéresis entre manos.
     `bone_side` = a qué huesos del rig se aplica (LeftHand* o RightHand*).
         Es el que cambia con swap.
-    `body_landmarks` = lms 33 del pose corporal (opcional). Si está dado y
-        data_side == bone_side, sobrescribe la orientación del ForeArm con
-        orient_yz(elbow→wrist, palm_normal) para restringir el roll y eliminar
-        la indeterminación que multiplica los flips de muñeca.
+    `body_landmarks` = lms 33 del pose corporal (opcional). Si está dado y la
+        muñeca de la mano corresponde al mismo lado del cuerpo que `bone_side`
+        (por proximidad, no por data_side), sobrescribe la orientación del
+        ForeArm con orient_yz(elbow→wrist, palm_normal) para restringir el roll
+        y eliminar la indeterminación que multiplica los flips de muñeca.
     """
     if not lms or len(lms) < 21:
         return 0
@@ -263,11 +277,13 @@ def _apply_one_hand(arm, data_side: str, bone_side: str, lms,
         return 0
     fwd, normal = basis
 
-    # Fix A: orientar el forearm con la palm normal (cuando no hay swap, para
-    # mantener coherencia con body.apply que usa los mismos lms por lado
-    # anatómico). Si hay swap, el body ya orientó con aim() y dejamos eso.
+    # Fix A: orientar el forearm con la palm normal cuando los landmarks del
+    # cuerpo corresponden al MISMO brazo que esta mano (por proximidad de
+    # muñeca, no por data_side — P1-5). Si la mano se aplica al lado contrario
+    # (swap manual), el body ya orientó con aim() y dejamos ese roll libre.
     forearm_world_3x3 = None
-    if body_landmarks and data_side == bone_side and len(body_landmarks) >= 17:
+    if body_landmarks and len(body_landmarks) >= 17 and \
+            _hand_matches_body_side(lms, body_landmarks, bone_side):
         forearm_world_3x3 = _orient_forearm_from_palm(
             arm, bone_side, body_landmarks, normal, prefix,
         )
