@@ -5,6 +5,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.request
 from pathlib import Path
@@ -269,6 +270,144 @@ def _tag_redraw_ui():
                 for region in area.regions:
                     if region.type == "UI":
                         region.tag_redraw()
+
+
+def _validate_rig(props, include_body: bool = True, include_hands: bool = True):
+    """Valida armature + prefijo de huesos. Compartido por start_capture y
+    generate_motion (K2). Devuelve (ok, error_msg)."""
+    arm = retarget.get_armature()
+    if arm is None:
+        return False, "No hay un armature en la escena. Importa un FBX Mixamo primero."
+    expected = retarget.get_keyframe_bones(
+        props.bone_prefix, include_body=include_body, include_hands=include_hands)
+    if expected:
+        matched = sum(1 for n in expected if n in arm.pose.bones)
+        props.bones_matched = matched
+        props.bones_total = len(expected)
+        if matched == 0:
+            hint = ""
+            for bone in arm.data.bones:
+                if bone.name.endswith("Hips"):
+                    hint = f" ¿Prefijo correcto: '{bone.name[:-4]}'? Usa 'Detectar prefijo'."
+                    break
+            return False, f"Ningún hueso coincide con el prefijo '{props.bone_prefix}'.{hint}"
+    return True, ""
+
+
+# --- Kimodo (texto → animación, K2) ----------------------------------------
+
+_KIMODO_STATE = {"proc": None, "log_fh": None, "out_path": None, "scene": None}
+
+
+def _kimodo_runner_path() -> Path:
+    return _addon_dir() / "kimodo" / "kimodo_runner.py"
+
+
+def _close_kimodo_log():
+    fh = _KIMODO_STATE.get("log_fh")
+    if fh is not None:
+        try:
+            fh.flush()
+            fh.close()
+        except Exception:
+            log.exception("cerrando log del subprocess de Kimodo")
+    _KIMODO_STATE["log_fh"] = None
+
+
+def _kill_kimodo_proc():
+    proc = _KIMODO_STATE.get("proc")
+    if proc is not None and proc.poll() is None:
+        try:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        except Exception:
+            log.exception("cerrando subprocess de Kimodo")
+    _KIMODO_STATE["proc"] = None
+    _close_kimodo_log()
+
+
+def _kimodo_get_props():
+    scene_name = _KIMODO_STATE.get("scene")
+    if scene_name:
+        scene = bpy.data.scenes.get(scene_name)
+        if scene is not None:
+            return scene.puppet_mocap
+    return bpy.context.scene.puppet_mocap
+
+
+def _kimodo_bake(props, out_path) -> str:
+    """Lee el .npz, convierte Kimodo→Mixamo y hornea a una action 'PuppetTake'.
+    Devuelve el nombre de la action."""
+    import numpy as np
+    from .kimodo import convert as kconv
+
+    arm = retarget.get_armature()
+    if arm is None:
+        raise RuntimeError("sin armature al hornear toma de Kimodo")
+    with np.load(out_path, allow_pickle=False) as z:
+        motion = {k: np.asarray(z[k]) for k in z.files}
+    j = int(motion["posed_joints"].shape[1])
+
+    rest3, rest_pos, parent_of = {}, {}, {}
+    for b in arm.data.bones:
+        rest3[b.name] = b.matrix_local.to_3x3()
+        rest_pos[b.name] = b.matrix_local.to_translation()
+        parent_of[b.name] = b.parent.name if b.parent else None
+
+    joint_names = kconv.joint_order(j)
+    mapping = kconv.mapping_for(j)
+    rotations, root = kconv.convert_motion(
+        motion, joint_names, rest3, rest_pos, parent_of, mapping, fps=30.0)
+
+    start = max(1, bpy.context.scene.frame_current)
+    channels = {}
+    for bone, pts in rotations.items():
+        esc = bpy.utils.escape_identifier(bone)
+        path = f'pose.bones["{esc}"].rotation_quaternion'
+        for i in range(4):
+            channels[(path, i, bone)] = [(start + f, q[i]) for f, q in pts]
+    for bone, pts in root.items():
+        esc = bpy.utils.escape_identifier(bone)
+        path = f'pose.bones["{esc}"].location'
+        for i in range(3):
+            channels[(path, i, bone)] = [(start + f, v[i]) for f, v in pts]
+    action = _bake_channels(arm, "OBJECT", "PuppetTake", channels, owner=arm.name)
+    _baked_state["body"] = action.name
+    return action.name
+
+
+def _kimodo_poll_timer():
+    """Timer (~0.25s) que vigila el subprocess de Kimodo. SEPARADO de
+    _drain_timer: el server TCP es de MediaPipe, no de Kimodo."""
+    props = _kimodo_get_props()
+    proc = _KIMODO_STATE.get("proc")
+    if proc is None:
+        return None  # unregister
+    rc = proc.poll()
+    if rc is None:
+        return 0.25  # sigue corriendo
+    out = _KIMODO_STATE.get("out_path")
+    _KIMODO_STATE["proc"] = None
+    _close_kimodo_log()
+    if rc == 0 and out and Path(out).exists():
+        try:
+            name = _kimodo_bake(props, out)
+            props.kimodo_status = f"Toma '{name}' generada"
+            log.info(f"kimodo ok: {props.kimodo_status}")
+        except Exception:
+            log.exception("kimodo bake")
+            props.kimodo_status = "Error al hornear la toma generada (revisa log)"
+    else:
+        reasons = {1: "faltan deps o modelo (log)", 2: "falló la generación (log)",
+                   3: "OOM de VRAM — usa el encoder en CPU (TEXT_ENCODER_DEVICE=cpu)"}
+        props.kimodo_status = f"Kimodo terminó: {reasons.get(rc, f'rc {rc}')}"
+        log.warn(f"kimodo subprocess rc={rc}")
+    props.kimodo_running = False
+    _tag_redraw_ui()
+    return None
 
 
 # --- Bake (buffer → fcurves) -----------------------------------------------
@@ -625,29 +764,14 @@ class PUPPET_OT_start_capture(bpy.types.Operator):
             log.error("Sin armature al iniciar captura")
             self.report({"ERROR"}, "No hay un armature en la escena. Importa un FBX Mixamo primero.")
             return {"CANCELLED"}
-
-        # Validación de prefijo: un mismatch dejaba el rig quieto en silencio
-        expected = retarget.get_keyframe_bones(
-            props.bone_prefix,
-            include_body=props.enable_body,
-            include_hands=props.enable_hands,
-        )
-        if expected:
-            matched = sum(1 for n in expected if n in arm.pose.bones)
-            props.bones_matched = matched
-            props.bones_total = len(expected)
-            if matched == 0:
-                hint = ""
-                for bone in arm.data.bones:
-                    if bone.name.endswith("Hips"):
-                        hint = f" ¿Prefijo correcto: '{bone.name[:-4]}'? Usa 'Detectar prefijo'."
-                        break
-                self.report({"ERROR"},
-                            f"Ningún hueso coincide con el prefijo '{props.bone_prefix}'.{hint}")
-                return {"CANCELLED"}
-            if matched < len(expected):
-                self.report({"WARNING"},
-                            f"Solo {matched}/{len(expected)} huesos coinciden con el prefijo")
+        ok, msg = _validate_rig(props, include_body=props.enable_body, include_hands=props.enable_hands)
+        if not ok:
+            log.error(msg)
+            self.report({"ERROR"}, msg)
+            return {"CANCELLED"}
+        if props.bones_matched < props.bones_total:
+            self.report({"WARNING"},
+                        f"Solo {props.bones_matched}/{props.bones_total} huesos coinciden con el prefijo")
 
         retarget.fix_orientation(prefix=props.bone_prefix)
 
@@ -1062,6 +1186,120 @@ class PUPPET_OT_clear_log(bpy.types.Operator):
         return {"FINISHED"}
 
 
+class PUPPET_OT_generate_motion(bpy.types.Operator):
+    bl_idname = "puppet_mocap.generate_motion"
+    bl_label = "Generar movimiento"
+    bl_description = "Genera una animación por texto (Kimodo) y la hornea a una action"
+
+    def execute(self, context):
+        props = context.scene.puppet_mocap
+        if props.kimodo_running:
+            self.report({"WARNING"}, "Ya hay una generación de Kimodo en curso")
+            return {"CANCELLED"}
+        # Independiente del estado de captura: NO consulta server.is_running().
+        _sync_target(props)
+        ok, msg = _validate_rig(props, include_body=True, include_hands=True)
+        if not ok:
+            self.report({"ERROR"}, msg)
+            return {"CANCELLED"}
+        py = props.kimodo_python_path
+        runner = _kimodo_runner_path()
+        if not py:
+            self.report({"ERROR"}, "Configura 'Python de Kimodo' en Settings")
+            return {"CANCELLED"}
+        if not runner.exists():
+            self.report({"ERROR"}, f"kimodo_runner no encontrado: {runner}")
+            return {"CANCELLED"}
+        out_dir = Path(tempfile.gettempdir()) / "puppet_mocap_kimodo"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        stem = str(out_dir / f"take_{int(time.time())}")
+        cmd = [py, str(runner), "--prompt", props.kimodo_prompt,
+               "--duration", str(props.kimodo_duration),
+               "--model", props.kimodo_model,
+               "--out", stem,
+               "--num_transition_frames", str(props.kimodo_num_transition)]
+        if props.kimodo_seed >= 0:
+            cmd += ["--seed", str(props.kimodo_seed)]
+        _kill_kimodo_proc()
+        try:
+            log_fh = open(log.get_kimodo_log_path(), "ab")
+            _KIMODO_STATE["log_fh"] = log_fh
+        except OSError:
+            log.exception("no pude abrir log de kimodo")
+            log_fh = None
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=log_fh if log_fh is not None else subprocess.DEVNULL,
+                stderr=subprocess.STDOUT if log_fh is not None else subprocess.DEVNULL,
+                cwd=str(_addon_dir()),
+                env=dict(os.environ),
+            )
+        except FileNotFoundError:
+            _close_kimodo_log()
+            self.report({"ERROR"}, f"Python de Kimodo no encontrado: {py}")
+            return {"CANCELLED"}
+        _KIMODO_STATE.update(proc=proc, out_path=stem + ".npz", scene=context.scene.name)
+        props.kimodo_running = True
+        props.kimodo_status = "Generando..."
+        log.banner(f"GENERATE MOTION prompt='{props.kimodo_prompt}' model={props.kimodo_model}")
+        if not bpy.app.timers.is_registered(_kimodo_poll_timer):
+            bpy.app.timers.register(_kimodo_poll_timer, first_interval=0.25, persistent=True)
+        self.report({"INFO"}, "Generación de Kimodo iniciada")
+        return {"FINISHED"}
+
+
+class PUPPET_OT_cancel_generate(bpy.types.Operator):
+    bl_idname = "puppet_mocap.cancel_generate"
+    bl_label = "Cancelar"
+    bl_description = "Mata el subprocess de Kimodo"
+
+    def execute(self, context):
+        props = context.scene.puppet_mocap
+        _kill_kimodo_proc()
+        props.kimodo_running = False
+        props.kimodo_status = "Cancelado"
+        self.report({"INFO"}, "Generación de Kimodo cancelada")
+        return {"FINISHED"}
+
+
+class PUPPET_OT_check_kimodo_deps(bpy.types.Operator):
+    bl_idname = "puppet_mocap.check_kimodo_deps"
+    bl_label = "Verificar deps de Kimodo"
+    bl_description = "Comprueba que el Python de Kimodo tenga torch + transformers + kimodo"
+
+    def execute(self, context):
+        props = context.scene.puppet_mocap
+        py = props.kimodo_python_path
+        if not py:
+            props.kimodo_status = "Configura el Python de Kimodo"
+            self.report({"ERROR"}, props.kimodo_status)
+            return {"CANCELLED"}
+        cmd = [py, "-c", "import torch, transformers, kimodo; print(torch.__version__)"]
+        flags = 0x08000000 if sys.platform == "win32" else 0
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True,
+                               timeout=30, creationflags=flags)
+        except FileNotFoundError:
+            props.kimodo_status = f"Python de Kimodo no encontrado: {py}"
+            self.report({"ERROR"}, props.kimodo_status)
+            return {"CANCELLED"}
+        except subprocess.TimeoutExpired:
+            props.kimodo_status = "Timeout verificando (¿antivirus?)"
+            self.report({"ERROR"}, props.kimodo_status)
+            return {"CANCELLED"}
+        if r.returncode == 0:
+            props.kimodo_status = f"OK — torch {r.stdout.strip()}"
+            log.info(f"kimodo deps: {props.kimodo_status}")
+            self.report({"INFO"}, props.kimodo_status)
+            return {"FINISHED"}
+        detail = (r.stderr or "").strip().splitlines()
+        props.kimodo_status = "FALTAN deps de Kimodo: " + (detail[-1] if detail else f"rc {r.returncode}")
+        log.error(f"kimodo deps: {props.kimodo_status}")
+        self.report({"ERROR"}, props.kimodo_status)
+        return {"CANCELLED"}
+
+
 CLASSES = (
     PUPPET_OT_start_capture,
     PUPPET_OT_stop_capture,
@@ -1075,4 +1313,7 @@ CLASSES = (
     PUPPET_OT_open_log,
     PUPPET_OT_clear_log,
     PUPPET_OT_download_models,
+    PUPPET_OT_generate_motion,
+    PUPPET_OT_cancel_generate,
+    PUPPET_OT_check_kimodo_deps,
 )

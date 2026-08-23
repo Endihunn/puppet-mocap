@@ -27,6 +27,9 @@ LOG_PATH = Path(tempfile.gettempdir()) / "puppet_mocap.log"
 # handles independientes sobre el MISMO archivo entrelazaban líneas a media y
 # "Limpiar Log" truncaba mientras el subprocess aún escribía.
 CAPTURE_LOG_PATH = Path(tempfile.gettempdir()) / "puppet_mocap_capture.log"
+# Log separado del subprocess de Kimodo (K2): su stdout/stderr va aquí, no al
+# log del addon ni al de captura (P1-3 ya arregló ese problema).
+KIMODO_LOG_PATH = Path(tempfile.gettempdir()) / "puppet_mocap_kimodo.log"
 _MAX_LOG_BYTES = 5 * 1024 * 1024  # rota si supera 5 MB
 
 _logger: logging.Logger | None = None
@@ -38,6 +41,10 @@ def get_log_path() -> str:
 
 def get_capture_log_path() -> str:
     return str(CAPTURE_LOG_PATH)
+
+
+def get_kimodo_log_path() -> str:
+    return str(KIMODO_LOG_PATH)
 
 
 class _FlushingFileHandler(logging.FileHandler):

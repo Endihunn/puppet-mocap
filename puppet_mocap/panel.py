@@ -269,5 +269,26 @@ class PUPPET_PT_main(bpy.types.Panel):
         launch.prop(props, "server_port")
         launch.prop(props, "python_path")
 
+        # --- Kimodo (texto → animación, K2) --- Independiente de la captura.
+        box = layout.box()
+        row = box.row(align=True)
+        row.prop(props, "kimodo_show", text="Generar (Kimodo)", toggle=True, icon="MOTION_PATH")
+        if props.kimodo_show:
+            col = box.column(align=True)
+            if props.kimodo_running:
+                col.label(text=props.kimodo_status or "Generando...", icon="TIME")
+                col.operator("puppet_mocap.cancel_generate", icon="CANCEL")
+            else:
+                col.prop(props, "kimodo_prompt")
+                col.prop(props, "kimodo_duration")
+                col.prop(props, "kimodo_model")
+                r2 = col.row(align=True)
+                r2.prop(props, "kimodo_seed")
+                r2.operator("puppet_mocap.check_kimodo_deps", text="", icon="CHECKMARK")
+                col.operator("puppet_mocap.generate_motion", icon="PLAY")
+                if props.kimodo_status:
+                    col.label(text=props.kimodo_status, icon="INFO")
+                col.label(text="Requiere: Python de Kimodo en Settings + acceso al modelo", icon="ERROR")
+
 
 CLASSES = (PUPPET_PT_main,)

@@ -174,3 +174,48 @@ def convert_motion(motion, joint_names, rest3, rest_pos, parent_of, mapping,
             root.setdefault("Hips", []).append((f, (loc.x, loc.y, loc.z)))
 
     return rotations, root
+
+
+# --- Orden de joints del npz (Kimodo), sin prefijo -------------------------
+# De kimodo/skeleton/definitions.py bone_order_names_with_parents.
+_SOMA_BODY = ["Hips", "Spine1", "Spine2", "Chest", "Neck1", "Neck2", "Head",
+              "HeadEnd", "Jaw", "LeftEye", "RightEye"]
+_SOMA_ARM = ["Shoulder", "Arm", "ForeArm", "Hand"]
+_SOMA_FINGERS = ["Thumb1", "Thumb2", "Thumb3", "ThumbEnd",
+                 "Index1", "Index2", "Index3", "Index4", "IndexEnd",
+                 "Middle1", "Middle2", "Middle3", "Middle4", "MiddleEnd",
+                 "Ring1", "Ring2", "Ring3", "Ring4", "RingEnd",
+                 "Pinky1", "Pinky2", "Pinky3", "Pinky4", "PinkyEnd"]
+_SOMA_LEG = ["Leg", "Shin", "Foot", "ToeBase", "ToeEnd"]
+
+
+def _soma77_order() -> list:
+    order = list(_SOMA_BODY)
+    for side in ("Left", "Right"):
+        order += [side + a for a in _SOMA_ARM]
+        order += [side + "Hand" + f for f in _SOMA_FINGERS]
+    order += ["Left" + s for s in _SOMA_LEG]
+    order += ["Right" + s for s in _SOMA_LEG]
+    return order
+
+
+SOMA77_JOINT_ORDER = _soma77_order()
+
+SMPLX22_JOINT_ORDER = [
+    "pelvis", "left_hip", "right_hip", "spine1", "left_knee", "right_knee",
+    "spine2", "left_ankle", "right_ankle", "spine3", "left_foot",
+    "right_foot", "neck", "left_collar", "right_collar", "head",
+    "left_shoulder", "right_shoulder", "left_elbow", "right_elbow",
+    "left_wrist", "right_wrist",
+]
+
+
+def joint_order(joint_count: int) -> list:
+    """Lista de nombres de joints Kimodo según el número de joints del npz."""
+    if joint_count == 77:
+        return list(SOMA77_JOINT_ORDER)
+    if joint_count == 22:
+        return list(SMPLX22_JOINT_ORDER)
+    if joint_count == 30:
+        return [n for n in SOMA77_JOINT_ORDER if n in _SOMA30_NAMES]
+    raise ValueError(f"unsupported Kimodo joint count: {joint_count}")

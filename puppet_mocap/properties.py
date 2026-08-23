@@ -249,3 +249,54 @@ class PuppetMocapProperties(bpy.types.PropertyGroup):
         min=1024,
         max=65535,
     )
+    # --- Kimodo (texto → animación, K2) ---
+    kimodo_python_path: bpy.props.StringProperty(
+        name="Python de Kimodo",
+        description="Ruta al python del venv de Kimodo (torch+CUDA, separado de MediaPipe)",
+        default="",
+        subtype="FILE_PATH",
+    )
+    kimodo_prompt: bpy.props.StringProperty(
+        name="Prompt",
+        description="Descripción del movimiento a generar (texto → animación)",
+        default="a person walks forward and waves",
+    )
+    kimodo_duration: bpy.props.FloatProperty(
+        name="Duración (s)",
+        description="Segundos de movimiento generado (máx ~17 s = 512 frames)",
+        default=5.0,
+        min=1.0,
+        max=17.0,
+    )
+    kimodo_model: bpy.props.StringProperty(
+        name="Modelo",
+        description="Kimodo-SOMA-RP-v1.1 (recomendado) u otro modelo Kimodo",
+        default="Kimodo-SOMA-RP-v1.1",
+    )
+    kimodo_seed: bpy.props.IntProperty(
+        name="Semilla",
+        description="Seed para reproducibilidad (-1 = aleatorio)",
+        default=-1,
+    )
+    kimodo_num_transition: bpy.props.IntProperty(
+        name="Frames de transición",
+        description="Frames de mezcla entre prompts múltiples",
+        default=5,
+        min=0,
+        max=60,
+    )
+    kimodo_running: bpy.props.BoolProperty(
+        name="Kimodo corriendo",
+        default=False,
+        options={"SKIP_SAVE"},
+    )
+    kimodo_status: bpy.props.StringProperty(
+        name="Kimodo status",
+        default="",
+        options={"SKIP_SAVE"},
+    )
+    kimodo_show: bpy.props.BoolProperty(
+        name="Kimodo",
+        default=False,  # colapsada por defecto — el panel ya está largo (K2)
+        options={"SKIP_SAVE"},
+    )

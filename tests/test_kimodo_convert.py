@@ -16,7 +16,7 @@ from mathutils import Matrix, Quaternion, Vector  # noqa: E402
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 from puppet_mocap.kimodo.convert import (  # noqa: E402
-    YUP_TO_ZUP, convert_motion, mapping_for)
+    YUP_TO_ZUP, convert_motion, mapping_for, joint_order)
 
 ZUP = YUP_TO_ZUP
 
@@ -100,6 +100,8 @@ def test_root_yup_to_zup_and_rest_basis():
 
 def test_mapping_for_joint_counts():
     assert len(mapping_for(77)) == 77 - 25  # descarta cara/neck2/falanges extra
-    # cada bone del mapeo es un hueso Mixamo válido (lista de body+hands)
     assert "Hips" in mapping_for(77).values()
     assert len(mapping_for(22)) == 22
+    # el orden de joints del npz debe coincidir con el número de joints
+    assert len(joint_order(77)) == 77
+    assert len(joint_order(22)) == 22
