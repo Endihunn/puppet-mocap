@@ -118,17 +118,20 @@ def fix_orientation(force: bool = False, prefix: str = "mixamorig:") -> bool:
 
 
 def clear_all_keyframes() -> bool:
-    """Borra la action del armature Y la animación facial (shape keys)."""
+    """Borra la action del armature objetivo Y su animación facial (shape keys).
+    Las tomas horneadas de OTROS rigs del archivo se conservan (T3: marcador
+    por dueño)."""
     arm = get_armature()
     if arm is None:
         return False
     if arm.animation_data and arm.animation_data.action:
         bpy.data.actions.remove(arm.animation_data.action, do_unlink=True)
     # Las tomas horneadas quedan desasignadas del slot en vivo (P0-1) pero
-    # conservadas con fake_user + marcador; purgarlas aquí para que "Borrar
-    # Keyframes" siga limpiando la animación completa.
+    # conservadas con fake_user + marcador; purgar SOLO las del armature
+    # objetivo, no las de otros rigs del archivo (T3).
     for action in list(bpy.data.actions):
-        if action.get("puppet_mocap_take"):
+        if (action.get("puppet_mocap_take")
+                and action.get("puppet_mocap_owner") == arm.name):
             bpy.data.actions.remove(action, do_unlink=True)
     # Animación de shape keys vive en un datablock aparte (Key) — sin esto,
     # la actuación facial vieja sobrevivía a "Borrar Keyframes".

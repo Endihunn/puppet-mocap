@@ -273,10 +273,12 @@ def _tag_redraw_ui():
 
 # --- Bake (buffer → fcurves) -----------------------------------------------
 
-def _bake_channels(id_data, id_type: str, name: str, channels: dict):
+def _bake_channels(id_data, id_type: str, name: str, channels: dict, owner: str = ""):
     """channels: {(data_path, index, group|None): [(frame, value), ...]}.
     API de slotted actions (Blender 4.4+; en 5.x action.fcurves ya no existe).
-    foreach_set es órdenes de magnitud más rápido que keyframe_insert."""
+    foreach_set es órdenes de magnitud más rápido que keyframe_insert.
+    `owner` marca la action con el nombre del armature dueño (T3) para que
+    "Borrar Keyframes" no destruya las tomas de OTROS rigs del archivo."""
     action = bpy.data.actions.new(name)
     ad = id_data.animation_data
     if ad is None:
@@ -318,6 +320,7 @@ def _bake_channels(id_data, id_type: str, name: str, channels: dict):
     # vivo (el rig "rebota" a la pose horneada). Se conserva con fake_user y un
     # marcador; el panel la re-asigna con "Reproducir toma".
     action["puppet_mocap_take"] = True
+    action["puppet_mocap_owner"] = owner
     action.use_fake_user = True
     ad.action = None
     return action
@@ -372,7 +375,7 @@ def _bake_take(arm, samples, start_frame: int, fps: float):
             path = f'pose.bones["{esc}"].location'
             for i in range(3):
                 channels[(path, i, name)] = [(f, v[i]) for f, v in pts]
-        body_action = _bake_channels(arm, "OBJECT", "PuppetTake", channels)
+        body_action = _bake_channels(arm, "OBJECT", "PuppetTake", channels, owner=arm.name)
 
     if shape_tracks:
         mesh = retarget.face.get_cached_mesh(arm)
@@ -382,7 +385,8 @@ def _bake_take(arm, samples, start_frame: int, fps: float):
                 for name, pts in shape_tracks.items()
             }
             face_action = _bake_channels(
-                mesh.data.shape_keys, "KEY", "PuppetTake_cara", channels)
+                mesh.data.shape_keys, "KEY", "PuppetTake_cara", channels,
+                owner=arm.name)
 
     _baked_state["body"] = body_action.name if body_action is not None else None
     _baked_state["face"] = face_action.name if face_action is not None else None
