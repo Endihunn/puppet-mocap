@@ -308,7 +308,10 @@ def _bake_channels(id_data, id_type: str, name: str, channels: dict):
             flat.append(float(f))
             flat.append(float(v))
         fc.keyframe_points.foreach_set("co", flat)
-        fc.keyframe_points.foreach_set("interpolation", [1] * n)  # 1 = LINEAR
+        # 1 = LINEAR. P2-5: interpolar componentes de cuaternión no es slerp;
+        # con keys densos (20-30/s) el error es invisible, pero revisitarlo
+        # si se añade decimado de keys.
+        fc.keyframe_points.foreach_set("interpolation", [1] * n)
         fc.update()
     # P0-1: la action horneada NO debe quedar asignada al slot en vivo — sus
     # fcurves re-evaluarían en cada cambio de frame y pisarían la captura en
