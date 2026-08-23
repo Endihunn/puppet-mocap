@@ -432,6 +432,24 @@ def _drain_timer():
         return 0.1
 
 
+def _flush_ui_pulse(props):
+    """Vuelca el contador acumulado de frames y last_record_frame a la RNA, y
+    redibuja SOLO si había algo pendiente. Sin time-gate: los caminos de salida
+    de _drain_tick (early return, watchdog) lo llaman para no dejar el contador
+    corto (T4), sin reintroducir el redraw a 50 Hz."""
+    dirty = False
+    if _ui_pulse_state["pending_frames"]:
+        props.frames_received += _ui_pulse_state["pending_frames"]
+        _ui_pulse_state["pending_frames"] = 0
+        dirty = True
+    if _ui_pulse_state["pending_last_frame"] is not None:
+        props.last_record_frame = _ui_pulse_state["pending_last_frame"]
+        _ui_pulse_state["pending_last_frame"] = None
+        dirty = True
+    if dirty:
+        _tag_redraw_ui()
+
+
 def _drain_tick():
     if not server.is_running():
         return None  # unregister
@@ -459,7 +477,7 @@ def _drain_tick():
         log.warn(f"subprocess murió rc={rc}; apagando captura")
         _finish_recording(scene, props)
         _cleanup_capture(props, unregister_timer=False)
-        _tag_redraw_ui()
+        _flush_ui_pulse(props)  # T4: volcar lo pendiente antes de apagar
         return None
 
     st = _record_state
@@ -498,6 +516,9 @@ def _drain_tick():
             _tag_redraw_ui()
 
     if not pose_msgs:
+        # T4: volcar lo pendiente antes de salir — el contador no debe quedar
+        # corto cuando el stream se corta.
+        _flush_ui_pulse(props)
         return 0.02
 
     # En vivo solo importa la pose más reciente — aplicar todo el backlog
@@ -570,13 +591,7 @@ def _drain_tick():
         scene.frame_current = last_frame
     if now - _ui_pulse_state["last"] >= 0.1:
         _ui_pulse_state["last"] = now
-        if _ui_pulse_state["pending_frames"]:
-            props.frames_received += _ui_pulse_state["pending_frames"]
-            _ui_pulse_state["pending_frames"] = 0
-        if _ui_pulse_state["pending_last_frame"] is not None:
-            props.last_record_frame = _ui_pulse_state["pending_last_frame"]
-            _ui_pulse_state["pending_last_frame"] = None
-        _tag_redraw_ui()
+        _flush_ui_pulse(props)
     return 0.02
 
 
