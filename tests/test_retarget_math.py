@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 mathutils = pytest.importorskip("mathutils")
-from mathutils import Matrix, Quaternion  # noqa: E402
+from mathutils import Matrix, Quaternion, Vector  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from puppet_mocap.retarget import common  # noqa: E402
@@ -93,3 +93,18 @@ def test_quat_one_euro_small_jump_not_rejected():
     q20 = Quaternion((math.cos(0.1), math.sin(0.1), 0.0, 0.0))  # 20°
     out = f(q20, 0.05)
     assert 1e-6 < out.rotation_difference(q0).angle < 0.2  # se mueve, no se atasca
+
+
+def test_root_translation_basis_conversion():
+    """T1: pose_bone.location está en el rest basis del hueso, no en arm-space.
+    M es la rest 3x3 de un Hips Mixamo que apunta +Z: Y_local→+Z_arm,
+    Z_local→−Y_arm, X_local→+X_arm (columnas = ejes locales en arm-space)."""
+    M = Matrix(((1.0, 0.0, 0.0), (0.0, 0.0, -1.0), (0.0, 1.0, 0.0)))
+    Minv = M.inverted_safe()
+    for D in (Vector((1, 0, 0)), Vector((0, 1, 0)), Vector((0, 0, 1))):
+        # round-trip: M @ (M⁻¹ @ D) == D
+        assert (M @ (Minv @ D) - D).length < 1e-6
+    # regresión: sin la conversión, los ejes Y/Z (los que Mixamo rota) difieren;
+    # si alguien revierte el fix y suma D directamente, este assert falla.
+    for D in (Vector((0, 1, 0)), Vector((0, 0, 1))):
+        assert (Minv @ D - D).length > 0.5

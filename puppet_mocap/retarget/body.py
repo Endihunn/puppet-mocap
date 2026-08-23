@@ -105,7 +105,12 @@ def _apply_root_translation(arm, hips, mid_hip, observed_torso_len, torso_ok,
     La referencia se captura en la primera frame con la feature activa, para que
     el rig se mueva RELATIVO a su posición actual y no salte a la posición
     absoluta de la persona. Escala: automática (altura_rig_torso /
-    altura_observada_torso) × multiplicador manual `root_scale`."""
+    altura_observada_torso) × multiplicador manual `root_scale`.
+
+    El delta de arm-space se convierte al REST BASIS del hueso (pose_bone.location
+    NO está en arm-space). Hips no tiene padre, así que matrix_local es la
+    conversión completa; si algún día se traslada un hueso con padre, haría
+    falta la cadena de matrices."""
     if hips is None:
         return
     ref = _state.get("root_hip_ref")
@@ -125,9 +130,12 @@ def _apply_root_translation(arm, hips, mid_hip, observed_torso_len, torso_ok,
             scale *= rig_torso / observed_torso_len
 
     d = mid_hip - ref
-    # arm-space == armature-local (convención Mixamo estándar: +Z arriba,
-    # personaje mirando -Y, +X = izquierda anatómica).
-    loc = root_loc_ref + Vector((d.x, d.y, d.z)) * scale
+    # pose_bone.location está en el REST BASIS del hueso, no en arm-space. El
+    # Hips de Mixamo apunta hacia arriba, así que matrix_local mapea
+    # Y_local→+Z_arm y Z_local→−Y_arm; sumar el delta sin convertir lo rotaba
+    # 90° sobre X (agacharse empujaba hacia atrás).
+    M = hips.bone.matrix_local.to_3x3()
+    loc = root_loc_ref + M.inverted_safe() @ (Vector((d.x, d.y, d.z)) * scale)
     hips.location = (
         smooth_scalar("root_loc_x", loc.x),
         smooth_scalar("root_loc_y", loc.y),
