@@ -1229,13 +1229,22 @@ class PUPPET_OT_generate_motion(bpy.types.Operator):
         except OSError:
             log.exception("no pude abrir log de kimodo")
             log_fh = None
+        kenv = dict(os.environ)
+        # Con el text encoder en GPU, Kimodo pide ~17 GB de VRAM y no cabe en
+        # una tarjeta de 16 GB; en CPU baja a <3 GB. Sin esto, generar desde la
+        # UI reventaba con OOM y el mensaje de error pedía al usuario que
+        # definiera una variable de entorno que la UI no ofrece.
+        kenv.setdefault("TEXT_ENCODER_DEVICE", "cpu")
+        # 'auto' sondea primero un servicio en 127.0.0.1:9550 y espera al
+        # timeout antes de caer al encoder local. 'local' se lo salta.
+        kenv.setdefault("TEXT_ENCODER_MODE", "local")
         try:
             proc = subprocess.Popen(
                 cmd,
                 stdout=log_fh if log_fh is not None else subprocess.DEVNULL,
                 stderr=subprocess.STDOUT if log_fh is not None else subprocess.DEVNULL,
                 cwd=str(_addon_dir()),
-                env=dict(os.environ),
+                env=kenv,
             )
         except FileNotFoundError:
             _close_kimodo_log()

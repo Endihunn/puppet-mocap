@@ -83,22 +83,67 @@ def test_identity_kimodo_gives_rest_mixamo():
             assert q.angle < 1e-4, f"{bone} frame {f} no quedó en rest (angle={q.angle})"
 
 
-def test_root_yup_to_zup_and_rest_basis():
-    # Hips.location está en el REST BASIS del hueso (bug T1). Con rest3[Hips]=I
-    # y head en el origen, un root en Kimodo (0,0.9,0) debe dar location=(0,0,0.9)
-    # (Y-up → Z-up) — POR EJE, no magnitud.
+def test_root_is_relative_to_first_frame():
+    """La traslación de raíz es RELATIVA al primer frame, no absoluta.
+
+    Kimodo canonicaliza su root a XZ=(0,0) con la cadera a ~1 m, que no tiene
+    relación con dónde está el Hips del rig. Usando la posición absoluta, sobre
+    un Mixamo de escala centimétrica el personaje se hundía 52 unidades bajo el
+    suelo en el frame 1.
+    """
     rest3 = {"Hips": Matrix.Identity(3)}
     rest_pos = {"Hips": Vector((0, 0, 0))}
     parent_of = {"Hips": None}
-    g = np.eye(3).reshape(1, 1, 3, 3)
-    rp = np.array([[0.0, 0.9, 0.0]])
+    g = np.tile(np.eye(3), (2, 1, 1, 1))
+    rp = np.array([[0.0, 0.9, 0.0], [0.0, 0.9, 0.0]])
     motion = {"global_rot_mats": g, "root_positions": rp, "fps": 30.0}
-    _rot, root = convert_motion(motion, ["Hips"], rest3, rest_pos,
-                                parent_of, {"Hips": "Hips"}, fps=30.0)
-    loc = root["Hips"][0][1]
-    _assert_close(loc[0], 0.0, 1e-5)   # X
-    _assert_close(loc[1], 0.0, 1e-5)   # Y (armature)
-    _assert_close(loc[2], 0.9, 1e-5)   # Z (up) — Kimodo +Y → Blender +Z
+    _rot, root = convert_motion(motion, ["Hips"], rest3, rest_pos, parent_of,
+                                {"Hips": "Hips"}, fps=30.0, root_scale=1.0)
+    for i in range(3):
+        _assert_close(root["Hips"][0][1][i], 0.0, 1e-6)
+
+
+def test_root_axes_per_axis():
+    """Delta de Kimodo → delta de Blender, EJE POR EJE (nunca magnitud).
+    Kimodo es Y-up: +Y=arriba, +Z=adelante, +X=lateral.
+    """
+    rest3 = {"Hips": Matrix.Identity(3)}
+    rest_pos = {"Hips": Vector((0, 0, 0))}
+    parent_of = {"Hips": None}
+    # frame 0 = origen; frame 1 = +0.5 en cada eje de Kimodo, por separado
+    cases = {
+        "arriba  (Kimodo +Y)": ([0.0, 0.5, 0.0], (0.0, 0.0, 0.5)),
+        "adelante(Kimodo +Z)": ([0.0, 0.0, 0.5], (0.0, -0.5, 0.0)),
+        "lateral (Kimodo +X)": ([0.5, 0.0, 0.0], (0.5, 0.0, 0.0)),
+    }
+    for label, (kimodo_delta, expected) in cases.items():
+        rp = np.array([[0.0, 0.0, 0.0], kimodo_delta])
+        motion = {"global_rot_mats": np.tile(np.eye(3), (2, 1, 1, 1)),
+                  "root_positions": rp, "fps": 30.0}
+        _rot, root = convert_motion(motion, ["Hips"], rest3, rest_pos, parent_of,
+                                    {"Hips": "Hips"}, fps=30.0, root_scale=1.0)
+        got = root["Hips"][1][1]
+        for i, ax in enumerate("XYZ"):
+            assert abs(got[i] - expected[i]) < 1e-6, (
+                f"{label}: eje {ax} dio {got[i]:+.3f}, esperaba {expected[i]:+.3f}")
+
+
+def test_root_scale_from_torso():
+    """Kimodo emite metros; un Mixamo típico está en centímetros (~100 unidades
+    de alto). Sin escalar, una caminata de 6 m avanzaba 6 unidades sobre un
+    cuerpo de 100 — el personaje caminaba en el sitio.
+    """
+    from puppet_mocap.kimodo.convert import torso_scale
+    # rig 100x: torso de 18 unidades; Kimodo: torso de 0.18 m
+    rest_pos = {"Hips": Vector((0, 0, 0)), "Spine2": Vector((0, 0, 18.0))}
+    pj = np.zeros((1, 2, 3), dtype=np.float32)
+    pj[0, 1] = (0.0, 0.18, 0.0)
+    motion = {"posed_joints": pj}
+    sc = torso_scale(motion, ["Hips", "Chest"], {"Hips": "Hips", "Chest": "Spine2"},
+                     rest_pos, "Hips")
+    _assert_close(sc, 100.0, 1e-3)
+    # sin datos suficientes cae a 1.0 en vez de reventar
+    assert torso_scale({}, [], {}, {}, "Hips") == 1.0
 
 
 def test_mapping_for_joint_counts():

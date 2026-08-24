@@ -110,6 +110,34 @@ def prefixed_mapping(mapping: dict, prefix: str) -> dict:
     return {k: f"{prefix}{v}" for k, v in mapping.items()}
 
 
+def torso_scale(motion, joint_names, mapping, rest_pos, root_bone) -> float:
+    """Factor metros (Kimodo) -> unidades del rig, medido sobre el torso.
+
+    Un FBX de Mixamo suele venir en escala centimetrica (~100 unidades de alto)
+    mientras Kimodo emite metros. Se deriva del rig en vez de hardcodearse,
+    igual que hace body._rig_torso_length para la captura.
+    """
+    pj = motion.get("posed_joints")
+    if pj is None or len(pj) == 0:
+        return 1.0
+    chest = mapping.get("Chest") or mapping.get("spine3")
+    if chest is None or chest not in rest_pos or root_bone not in rest_pos:
+        return 1.0
+    rig_torso = (rest_pos[chest] - rest_pos[root_bone]).length
+    idx = {}
+    for j, name in enumerate(joint_names):
+        b = mapping.get(name)
+        if b in (root_bone, chest):
+            idx[b] = j
+    if root_bone not in idx or chest not in idx:
+        return 1.0
+    a, b = pj[0, idx[root_bone]], pj[0, idx[chest]]
+    k_torso = float(sum((float(a[i]) - float(b[i])) ** 2 for i in range(3)) ** 0.5)
+    if k_torso < 1e-6 or rig_torso < 1e-6:
+        return 1.0
+    return rig_torso / k_torso
+
+
 def _hierarchy_order(bones: set, parent_of: dict) -> list:
     """Orden topológico: padres antes que hijos."""
     def _depth(b):
@@ -140,7 +168,8 @@ def _chained_world(bone, rest3, parent, parent_world, basis3x3):
 
 
 def convert_motion(motion, joint_names, rest3, rest_pos, parent_of, mapping,
-                   fps: float = 30.0, apply_root: bool = True):
+                   fps: float = 30.0, apply_root: bool = True,
+                   root_scale: float | None = None):
     """Convierte un npz de Kimodo a cuaterniones Mixamo por hueso.
 
     motion: dict del npz (global_rot_mats [T,J,3,3] Y-up, root_positions [T,3]).
@@ -177,6 +206,10 @@ def convert_motion(motion, joint_names, rest3, rest_pos, parent_of, mapping,
     if root_bone is None:
         raise ValueError("el mapping no define un hueso raíz (Hips/pelvis)")
 
+    if root_scale is None:
+        root_scale = torso_scale(motion, joint_names, mapping, rest_pos, root_bone)
+    root_ref = None  # posición del primer frame; la traslación es relativa
+
     rotations: dict = {}
     root: dict = {}
     for f in frames:
@@ -208,12 +241,20 @@ def convert_motion(motion, joint_names, rest3, rest_pos, parent_of, mapping,
 
         if apply_root and f < T:
             posbl = YUP_TO_ZUP @ Vector((rp[f, 0], rp[f, 1], rp[f, 2]))
-            # El hueso raíz sale del MAPPING, no de la constante "Hips": un
-            # rig Mixamo real usa el prefijo ("mixamorig:Hips") y hardcodear
-            # el nombre hacía que la traslación de raíz no se aplicara nunca.
+            if root_ref is None:
+                root_ref = posbl.copy()
+            # RELATIVO al primer frame, no absoluto: Kimodo canonicaliza su
+            # root a XZ=(0,0) y una altura de cadera de ~1 m, que no tiene nada
+            # que ver con dónde está el Hips del rig. Restando la posición de
+            # reposo, el personaje se hundía 52 unidades bajo el suelo en el
+            # frame 1 sobre un rig Mixamo de escala centimétrica.
+            #
+            # ESCALADO: Kimodo trabaja en metros; el rig puede estar en
+            # centímetros (un Mixamo típico mide ~100 unidades). Sin el factor,
+            # una caminata de 6.4 m avanzaba 6.4 unidades sobre un cuerpo de
+            # 100 — el personaje caminaba en el sitio.
             h3 = rest3.get(root_bone, Matrix.Identity(3))
-            head = rest_pos.get(root_bone, Vector((0.0, 0.0, 0.0)))
-            loc = h3.inverted() @ (posbl - head)
+            loc = h3.inverted() @ ((posbl - root_ref) * root_scale)
             root.setdefault(root_bone, []).append((f, (loc.x, loc.y, loc.z)))
 
     return rotations, root
