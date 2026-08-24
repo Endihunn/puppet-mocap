@@ -112,7 +112,6 @@ def test_root_is_relative_to_first_frame():
     rest3 = {"Hips": Matrix.Identity(3)}
     rest_pos = {"Hips": Vector((0, 0, 0))}
     parent_of = {"Hips": None}
-    g = np.tile(np.eye(3), (2, 1, 1, 1))
     rp = np.array([[0.0, 0.9, 0.0], [0.0, 0.9, 0.0]])
     motion = {"posed_joints": np.zeros((len(rp), 77, 3)),
               "root_positions": rp, "fps": 30.0}
