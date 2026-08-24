@@ -48,7 +48,8 @@ def _kimodo_checklist(ops_mod, props):
         ok, _ = ops_mod._validate_rig(props, write=False)
         rig_ok = ok
     data = {"python_ok": python_ok, "kimodo_ok": python_ok,
-            "rig_ok": rig_ok, "arm_name": arm_name}
+            "rig_ok": rig_ok, "arm_name": arm_name,
+            "model_ok": ops_mod._kimodo_encoder_ready()}
     _kimodo_checklist_cache["t"] = now
     _kimodo_checklist_cache["data"] = data
     return data
@@ -318,8 +319,8 @@ class PUPPET_PT_main(bpy.types.Panel):
                     col.operator("puppet_mocap.play_kimodo_take", icon="PLAY",
                                  text="Ver la animación")
                 # U2: lista de comprobación (solo si algo no está listo)
-                need_list = (not ch["python_ok"] or not ch["rig_ok"]
-                             or not ops_mod._KIMODO_STATE.get("done_ok"))
+                need_list = not (ch["python_ok"] and ch["rig_ok"]
+                                 and ch["model_ok"])
                 if need_list:
                     if not ch["python_ok"]:
                         rr = col.row(align=True)
@@ -329,11 +330,12 @@ class PUPPET_PT_main(bpy.types.Panel):
                     if ch["python_ok"] and not ch["rig_ok"]:
                         col.label(text="✗ Rig no encontrado. Importa un FBX de Mixamo.",
                                   icon="ERROR")
-                    if not ops_mod._KIMODO_STATE.get("done_ok"):
-                        col.label(text="Acceso al modelo (Hugging Face): cuenta + aceptar "
-                                       "la licencia de Meta Llama-3",
+                    if not ch["model_ok"]:
+                        col.label(text="Falta descargar el modelo de texto",
                                   icon="QUESTION")
-                        col.operator("puppet_mocap.open_kimodo_license", text="Cómo obtenerlo")
+                        col.label(text="Necesita cuenta de Hugging Face")
+                        col.operator("puppet_mocap.open_kimodo_license",
+                                     text="Cómo obtener acceso")
                 # U3: prompt (en inglés) + ejemplo
                 col.prop(props, "kimodo_prompt")
                 col.prop(props, "kimodo_example")

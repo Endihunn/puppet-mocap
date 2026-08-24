@@ -306,6 +306,48 @@ def _validate_rig(props, include_body: bool = True, include_hands: bool = True,
 _KIMODO_STATE = {"proc": None, "log_fh": None, "out_path": None, "scene": None,
                  "t0": 0.0, "done_ok": False, "last_name": None,
                  "last_start": 1, "last_rc": None, "gate": False}
+# Repo gated del text encoder (LLM2Vec va sobre Llama-3). Su presencia en la
+# caché de HuggingFace es la prueba REAL de que el acceso está concedido y de
+# que la generación puede correr sin red.
+LLAMA_REPO_DIR = "models--meta-llama--Meta-Llama-3-8B-Instruct"
+_KIMODO_ENCODER = {"t": 0.0, "ok": False}
+_KIMODO_ENCODER_TTL = 30.0
+
+
+def _hf_hub_dir() -> Path:
+    """Raíz de la caché del hub, respetando HF_HUB_CACHE / HF_HOME."""
+    hub = os.environ.get("HF_HUB_CACHE")
+    if hub:
+        return Path(hub)
+    home = os.environ.get("HF_HOME")
+    if home:
+        return Path(home) / "hub"
+    return Path.home() / ".cache" / "huggingface" / "hub"
+
+
+def _kimodo_encoder_ready() -> bool:
+    """True si los pesos del text encoder ya están descargados.
+
+    Antes el panel usaba "¿hubo una generación exitosa en ESTA sesión?" como
+    sustituto, así que al reabrir Blender pedía acceso a Hugging Face a un
+    usuario que ya lo tenía. Esto es un check de disco, persistente y barato
+    (con TTL), y además responde a lo que de verdad importa: si los pesos están,
+    la generación funciona incluso sin red.
+    """
+    now = time.monotonic()
+    if now - _KIMODO_ENCODER["t"] < _KIMODO_ENCODER_TTL:
+        return _KIMODO_ENCODER["ok"]
+    ok = False
+    try:
+        snaps = _hf_hub_dir() / LLAMA_REPO_DIR / "snapshots"
+        if snaps.is_dir():
+            ok = any(any(d.glob("*.safetensors")) for d in snaps.iterdir() if d.is_dir())
+    except OSError:
+        ok = False
+    _KIMODO_ENCODER.update(t=now, ok=ok)
+    return ok
+
+
 _KIMODO_AUTODETECT = {"t": 0.0, "done": False}
 _KIMODO_AUTODETECT_TTL = 5.0
 
