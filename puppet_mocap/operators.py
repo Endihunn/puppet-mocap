@@ -1,6 +1,7 @@
 """Operators de Puppet Mocap."""
 from __future__ import annotations
 
+import math
 import os
 import re
 import subprocess
@@ -270,6 +271,26 @@ def _tag_redraw_ui():
                 for region in area.regions:
                     if region.type == "UI":
                         region.tag_redraw()
+
+
+def _armature_transform_warning(arm) -> str:
+    """K2/P2-4: Mixamo FBX trae su Y-up nativo; Blender lo reconcilia rotando
+    el OBJETO, no los datos de hueso. Tanto convert.py (Kimodo) como
+    body._apply_root_translation asumen que el espacio armature-local ya es
+    el Z-up de Blender -- sin 'Object > Apply > Rotation' tras importar, la
+    traslación de raíz sale proyectada al eje equivocado (el personaje se
+    hunde en vez de caminar hacia adelante). Las rotaciones de hueso no se
+    ven afectadas, solo la traslación de la raíz.
+    """
+    if arm is None:
+        return ""
+    angle = arm.matrix_local.to_quaternion().angle
+    if angle < 0.01:  # ~0.6°, ruido de precisión de punto flotante
+        return ""
+    deg = math.degrees(angle)
+    return (f"El armature tiene una rotación sin aplicar ({deg:.0f}°): "
+            f"la traslación de raíz puede salir en el eje equivocado. "
+            f"Corregí con Object > Apply > Rotation (o All Transforms).")
 
 
 def _validate_rig(props, include_body: bool = True, include_hands: bool = True,
@@ -1202,10 +1223,14 @@ class PUPPET_OT_detect_prefix(bpy.types.Operator):
                     matched = sum(1 for n in expected if n in arm.pose.bones)
                     props.bones_matched = matched
                     props.bones_total = len(expected)
-                    self.report({"INFO"},
-                                f"Prefijo: '{prefix}' ({matched}/{len(expected)} huesos)")
+                    msg = f"Prefijo: '{prefix}' ({matched}/{len(expected)} huesos)"
                 else:
-                    self.report({"INFO"}, f"Prefijo: '{prefix}'")
+                    msg = f"Prefijo: '{prefix}'"
+                warn = _armature_transform_warning(arm)
+                if warn:
+                    self.report({"WARNING"}, f"{msg} — {warn}")
+                else:
+                    self.report({"INFO"}, msg)
                 return {"FINISHED"}
         self.report({"ERROR"}, "No encontré un hueso que termine en 'Hips'")
         return {"CANCELLED"}
@@ -1353,6 +1378,10 @@ class PUPPET_OT_generate_motion(bpy.types.Operator):
         if not ok:
             self.report({"ERROR"}, msg)
             return {"CANCELLED"}
+        warn = _armature_transform_warning(retarget.get_armature())
+        if warn:
+            self.report({"WARNING"}, warn)
+            log.warn(f"kimodo: {warn}")
         py = props.kimodo_python_path
         runner = _kimodo_runner_path()
         if not py:
