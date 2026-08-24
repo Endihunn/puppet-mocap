@@ -11,3 +11,8 @@ desktop.ini
 # Python caches
 __pycache__/
 *.pyc
+
+# artefactos de test/build locales
+.pytest_cache/
+test_project.blend
+test_project.blend1
