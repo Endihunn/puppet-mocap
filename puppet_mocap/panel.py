@@ -28,6 +28,32 @@ def _fs_state(ops_mod):
     return _fs_cache
 
 
+# Cache de la lista de comprobación de Kimodo (TTL ~5 s): python_ok/kimodo_ok
+# requieren un subprocess de import; no escanear por redibujo (U2).
+_kimodo_checklist_cache = {"t": 0.0, "data": None}
+
+
+def _kimodo_checklist(ops_mod, props):
+    now = time.monotonic()
+    if _kimodo_checklist_cache["data"] is not None and now - _kimodo_checklist_cache["t"] < 5.0:
+        return _kimodo_checklist_cache["data"]
+    py = props.kimodo_python_path
+    python_ok = bool(py) and ops_mod._kimodo_python_valid(py)
+    rig_ok = False
+    arm_name = ""
+    from .retarget import get_armature
+    arm = get_armature()
+    if arm is not None:
+        arm_name = arm.name
+        ok, _ = ops_mod._validate_rig(props)
+        rig_ok = ok
+    data = {"python_ok": python_ok, "kimodo_ok": python_ok,
+            "rig_ok": rig_ok, "arm_name": arm_name}
+    _kimodo_checklist_cache["t"] = now
+    _kimodo_checklist_cache["data"] = data
+    return data
+
+
 def _module_box(layout, props, title, icon, enable_attr, record_attr):
     """Caja con header (toggle de habilitar) y switch de grabación."""
     box = layout.box()
@@ -274,35 +300,83 @@ class PUPPET_PT_main(bpy.types.Panel):
         row = box.row(align=True)
         row.prop(props, "kimodo_show", text="Generar (Kimodo)", toggle=True, icon="MOTION_PATH")
         if props.kimodo_show:
+            # U1: autodetecta el Python de Kimodo una vez por sesión (cache negativo)
+            ops_mod._maybe_autodetect_kimodo(props)
             col = box.column(align=True)
             if props.kimodo_running:
-                col.label(text=props.kimodo_status or "Generando...", icon="TIME")
+                # U5: progreso
+                col.label(text=props.kimodo_status or "Generando…", icon="TIME")
+                col.label(text="Cargando el modelo (la primera vez tarda más)", icon="INFO")
                 col.operator("puppet_mocap.cancel_generate", icon="CANCEL")
             else:
+                ch = _kimodo_checklist(ops_mod, props)
+                # U5: resultado (banner) — el prompt queda visible para probar otro
+                if ops_mod._KIMODO_STATE.get("done_ok"):
+                    frames = props.kimodo_result_frames
+                    col.label(text=f"✓ Listo: {frames} frames ({frames / 30.0:.0f} s)",
+                              icon="CHECKMARK")
+                    col.operator("puppet_mocap.play_kimodo_take", icon="PLAY",
+                                 text="Ver la animación")
+                # U2: lista de comprobación (solo si algo no está listo)
+                need_list = (not ch["python_ok"] or not ch["rig_ok"]
+                             or not ops_mod._KIMODO_STATE.get("done_ok"))
+                if need_list:
+                    if not ch["python_ok"]:
+                        rr = col.row(align=True)
+                        rr.label(text="✗ Python de Kimodo", icon="ERROR")
+                        rr.operator("puppet_mocap.autodetect_kimodo_python", text="Detectar")
+                        col.prop(props, "kimodo_python_path", text="")
+                    if ch["python_ok"] and not ch["rig_ok"]:
+                        col.label(text="✗ Rig no encontrado. Importa un FBX de Mixamo.",
+                                  icon="ERROR")
+                    if not ops_mod._KIMODO_STATE.get("done_ok"):
+                        col.label(text="Acceso al modelo (Hugging Face): cuenta + aceptar "
+                                       "la licencia de Meta Llama-3",
+                                  icon="QUESTION")
+                        col.operator("puppet_mocap.open_kimodo_license", text="Cómo obtenerlo")
+                # U3: prompt (en inglés) + ejemplo
                 col.prop(props, "kimodo_prompt")
+                col.prop(props, "kimodo_example")
                 col.prop(props, "kimodo_duration")
                 if props.kimodo_duration > 10.0:
                     col.label(
-                        text=f"Duración {props.kimodo_duration:.0f}s > 10s (máx. de ",
-                        icon="ERROR",
-                    )
-                    col.label(
-                        text="entrenamiento del modelo): trocea el prompt en segmentos",
-                        icon="ERROR",
-                    )
-                col.prop(props, "kimodo_num_transition")
-                col.prop(props, "kimodo_model")
-                col.prop(props, "kimodo_postprocess")
-                if not props.kimodo_postprocess:
-                    col.label(text="Sin postprocess: los pies pueden patinar",
+                        text=f"Duración {props.kimodo_duration:.0f}s > 10s: el modelo se "
+                             f"entrena a máximo 10s; trocea el prompt en segmentos",
+                        icon="ERROR")
+                # U4: Avanzado plegado
+                ar = col.row(align=True)
+                ar.prop(props, "kimodo_advanced", text="Avanzado", toggle=True,
+                        icon="PREFERENCES")
+                if props.kimodo_advanced:
+                    col.prop(props, "kimodo_model")
+                    rr = col.row(align=True)
+                    rr.prop(props, "kimodo_seed_use", text="Resultado repetible")
+                    if props.kimodo_seed_use:
+                        rr.prop(props, "kimodo_seed", text="N.º")
+                    pp = col.row(align=True)
+                    pp.enabled = False
+                    pp.prop(props, "kimodo_postprocess")
+                    col.label(text="El postprocess necesita un componente no instalado; "
+                                   "déjalo apagado", icon="INFO")
+                # Generar (deshabilitado si el prompt está vacío)
+                gen_row = col.row(align=True)
+                gen_row.enabled = bool(props.kimodo_prompt.strip())
+                gen_row.operator("puppet_mocap.generate_motion", icon="PLAY")
+                if not gen_row.enabled:
+                    col.label(text="Escribe un prompt (en inglés) o elige un ejemplo",
                               icon="INFO")
-                r2 = col.row(align=True)
-                r2.prop(props, "kimodo_seed")
-                r2.operator("puppet_mocap.check_kimodo_deps", text="", icon="CHECKMARK")
-                col.operator("puppet_mocap.generate_motion", icon="PLAY")
-                if props.kimodo_status:
-                    col.label(text=props.kimodo_status, icon="INFO")
-                col.label(text="Requiere: Python de Kimodo en Settings + acceso al modelo", icon="ERROR")
+                # U6: estado + acción accionable
+                if props.kimodo_status and not ops_mod._KIMODO_STATE.get("done_ok"):
+                    col.label(text=props.kimodo_status, icon="ERROR")
+                last_rc = ops_mod._KIMODO_STATE.get("last_rc")
+                if not ops_mod._KIMODO_STATE.get("done_ok") and last_rc is not None:
+                    if ops_mod._KIMODO_STATE.get("gate"):
+                        col.operator("puppet_mocap.open_kimodo_license",
+                                     text="Cómo obtener acceso al modelo")
+                    elif last_rc == 1:
+                        col.operator("puppet_mocap.check_kimodo_deps", text="Comprobar Kimodo")
+                    elif last_rc == 2:
+                        col.operator("puppet_mocap.open_kimodo_log", text="Ver detalles")
 
 
 CLASSES = (PUPPET_PT_main,)

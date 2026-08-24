@@ -11,6 +11,25 @@ def _play_take_update(self, context):
     operators.set_take_playback(self.play_take)
 
 
+# --- Kimodo: prompts de ejemplo (en inglés, con label en español) ----------
+KIMODO_EXAMPLES = [
+    ("a person walks forward and waves", "Camina y saluda", ""),
+    ("a person sits down on a chair", "Se sienta en una silla", ""),
+    ("a person jumps and lands", "Salta y aterriza", ""),
+    ("a person kicks a soccer ball", "Patea un balón", ""),
+    ("a person does a cartwheel", "Da una voltereta", ""),
+    ("a person waves hello", "Saluda con la mano", ""),
+    ("a person does jumping jacks", "Hace jumping jacks", ""),
+    ("a person walks backwards", "Camina hacia atrás", ""),
+    ("a person crouches and stands up", "Se agacha y se levanta", ""),
+    ("a person dances", "Baila", ""),
+]
+
+
+def _kimodo_example_update(self, context):
+    self.kimodo_prompt = self.kimodo_example
+
+
 class PuppetMocapProperties(bpy.types.PropertyGroup):
     # Estado runtime (no se persiste a través de file save porque OPTIONS={'SKIP_SAVE'})
     server_running: bpy.props.BoolProperty(
@@ -257,9 +276,15 @@ class PuppetMocapProperties(bpy.types.PropertyGroup):
         subtype="FILE_PATH",
     )
     kimodo_prompt: bpy.props.StringProperty(
-        name="Prompt",
-        description="Descripción del movimiento a generar (texto → animación)",
+        name="Prompt (en inglés)",
+        description="Describe el movimiento en inglés; el modelo entiende solo inglés y solo acciones de cuerpo (sin dedos). Usa un ejemplo como punto de partida y edítalo",
         default="a person walks forward and waves",
+    )
+    kimodo_example: bpy.props.EnumProperty(
+        name="Ejemplos",
+        items=KIMODO_EXAMPLES,
+        description="Punto de partida que rellena el prompt. Puedes editarlo",
+        update=_kimodo_example_update,
     )
     kimodo_duration: bpy.props.FloatProperty(
         name="Duración (s)",
@@ -268,9 +293,14 @@ class PuppetMocapProperties(bpy.types.PropertyGroup):
         min=1.0,
         max=17.0,
     )
-    kimodo_model: bpy.props.StringProperty(
+    kimodo_model: bpy.props.EnumProperty(
         name="Modelo",
-        description="Kimodo-SOMA-RP-v1.1 (recomendado) u otro modelo Kimodo",
+        items=[
+            ("Kimodo-SOMA-RP-v1.1", "Kimodo-SOMA-RP-v1.1", "SOMA 77 joints (recomendado)"),
+            ("Kimodo-SOMA-RP-v1", "Kimodo-SOMA-RP-v1", "SOMA v1"),
+            ("Kimodo-SMPLX-RP-v1", "Kimodo-SMPLX-RP-v1", "SMPL-X (licencia R&D)"),
+        ],
+        description="Modelo Kimodo (el default SOMA es el recomendado)",
         default="Kimodo-SOMA-RP-v1.1",
     )
     kimodo_seed: bpy.props.IntProperty(
@@ -294,6 +324,21 @@ class PuppetMocapProperties(bpy.types.PropertyGroup):
             "generación FALLA al final. Desactivado = los pies pueden patinar"
         ),
         default=False,
+    )
+    kimodo_seed_use: bpy.props.BoolProperty(
+        name="Resultado repetible",
+        description="Reutiliza la misma semilla para reproducir exactamente el mismo resultado",
+        default=False,
+    )
+    kimodo_advanced: bpy.props.BoolProperty(
+        name="Avanzado",
+        default=False,
+        options={"SKIP_SAVE"},
+    )
+    kimodo_result_frames: bpy.props.IntProperty(
+        name="Frames del resultado",
+        default=0,
+        options={"SKIP_SAVE"},
     )
     kimodo_running: bpy.props.BoolProperty(
         name="Kimodo corriendo",

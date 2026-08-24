@@ -296,11 +296,106 @@ def _validate_rig(props, include_body: bool = True, include_hands: bool = True):
 
 # --- Kimodo (texto → animación, K2) ----------------------------------------
 
-_KIMODO_STATE = {"proc": None, "log_fh": None, "out_path": None, "scene": None}
+_KIMODO_STATE = {"proc": None, "log_fh": None, "out_path": None, "scene": None,
+                 "t0": 0.0, "done_ok": False, "last_name": None,
+                 "last_start": 1, "last_rc": None, "gate": False}
+_KIMODO_AUTODETECT = {"t": 0.0, "done": False}
+_KIMODO_AUTODETECT_TTL = 5.0
 
 
 def _kimodo_runner_path() -> Path:
     return _addon_dir() / "kimodo" / "kimodo_runner.py"
+
+
+def _kimodo_log_tail(chars: int = 4000) -> str:
+    """Últimos chars del log del subprocess de Kimodo (para diagnóstico de errores)."""
+    try:
+        p = log.get_kimodo_log_path()
+        if not Path(p).exists():
+            return ""
+        with open(p, "r", encoding="utf-8", errors="replace") as f:
+            return f.read()[-chars:]
+    except OSError:
+        return ""
+
+
+def _kimodo_log_tail_lower() -> str:
+    return _kimodo_log_tail().lower()
+
+
+def _kimodo_python_valid(path) -> bool:
+    """True si `path` es un python con kimodo importable (no solo que exista)."""
+    if not path or not Path(path).exists():
+        return False
+    flags = 0x08000000 if sys.platform == "win32" else 0
+    try:
+        r = subprocess.run([str(path), "-c", "import kimodo"],
+                           capture_output=True, timeout=10, creationflags=flags)
+        return r.returncode == 0
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+
+
+def _autodetect_kimodo_python(props) -> str:
+    """Busca y valida un python de Kimodo. Devuelve el path (o '' si no hay)."""
+    def _try(p) -> str | None:
+        p = str(p)
+        return p if _kimodo_python_valid(p) else None
+    env = os.environ.get("KIMODO_PYTHON")
+    if env:
+        r = _try(env)
+        if r:
+            return r
+    r = _try(os.path.expanduser("~\\_kimodo_spike\\venv\\Scripts\\python.exe"))
+    if r:
+        return r
+    base = _addon_dir().parent
+    for cand in (base / "venv", base / ".venv"):
+        r = _try(cand / "Scripts" / "python.exe")
+        if r:
+            return r
+    import glob
+    for d in sorted(glob.glob(os.path.expanduser("~\\*kimodo*\\venv\\Scripts\\python.exe"))):
+        r = _try(d)
+        if r:
+            return r
+    return ""
+
+
+def _maybe_autodetect_kimodo(props):
+    """Autodetecta UNA vez por sesión la primera vez que la caja se despliega
+    con la ruta vacía (cache negativo con TTL; nada de escanear por redibujo)."""
+    if props.kimodo_python_path or _KIMODO_AUTODETECT["done"]:
+        return
+    now = time.monotonic()
+    if now - _KIMODO_AUTODETECT["t"] < _KIMODO_AUTODETECT_TTL:
+        return
+    _KIMODO_AUTODETECT["t"] = now
+    _KIMODO_AUTODETECT["done"] = True
+    found = _autodetect_kimodo_python(props)
+    if found:
+        props.kimodo_python_path = found
+        props.kimodo_status = "Python de Kimodo detectado automáticamente"
+
+
+def _kimodo_error_message(props, rc) -> str:
+    """Traduce el returncode del runner a un mensaje ACCIONABLE (U6). Detecta el
+    gate de Llama-3 leyendo el log."""
+    low = _kimodo_log_tail_lower()
+    gate_markers = ("gated repo", "meta-llama", "401", "403",
+                    "you are not in the authorized", "cannot access gated")
+    if any(m in low for m in gate_markers):
+        _KIMODO_STATE["gate"] = True
+        return ("El modelo requiere acceso: necesitas cuenta en Hugging Face y "
+                "aceptar la licencia de Meta Llama-3")
+    _KIMODO_STATE["gate"] = False
+    if rc == 1:
+        return "Falta instalar Kimodo en ese Python"
+    if rc == 2:
+        return "La generación falló"
+    if rc == 3:
+        return "Sin memoria de vídeo. Cierra otras aplicaciones 3D"
+    return f"La generación terminó con un error (código {rc})"
 
 
 def _close_kimodo_log():
@@ -376,6 +471,8 @@ def _kimodo_bake(props, out_path) -> str:
             channels[(path, i, bone)] = [(start + f, v[i]) for f, v in pts]
     action = _bake_channels(arm, "OBJECT", "PuppetTake", channels, owner=arm.name)
     _baked_state["body"] = action.name
+    _KIMODO_STATE["last_start"] = start
+    props.kimodo_result_frames = int(motion["posed_joints"].shape[0])
     return action.name
 
 
@@ -386,24 +483,29 @@ def _kimodo_poll_timer():
     proc = _KIMODO_STATE.get("proc")
     if proc is None:
         return None  # unregister
+    t0 = _KIMODO_STATE.get("t0", 0.0)
     rc = proc.poll()
     if rc is None:
+        elapsed = (time.time() - t0) if t0 else 0.0
+        props.kimodo_status = f"Generando… {elapsed:.0f} s"
         return 0.25  # sigue corriendo
     out = _KIMODO_STATE.get("out_path")
     _KIMODO_STATE["proc"] = None
     _close_kimodo_log()
+    _KIMODO_STATE["done_ok"] = False
+    _KIMODO_STATE["last_rc"] = rc
     if rc == 0 and out and Path(out).exists():
         try:
-            name = _kimodo_bake(props, out)
-            props.kimodo_status = f"Toma '{name}' generada"
+            _kimodo_bake(props, out)
+            frames = int(getattr(props, "kimodo_result_frames", 0) or 0)
+            props.kimodo_status = f"Listo: {frames} frames ({frames / 30.0:.0f} s)"
             log.info(f"kimodo ok: {props.kimodo_status}")
+            _KIMODO_STATE["done_ok"] = True
         except Exception:
             log.exception("kimodo bake")
-            props.kimodo_status = "Error al hornear la toma generada (revisa log)"
+            props.kimodo_status = "Error al hornear la toma generada"
     else:
-        reasons = {1: "faltan deps o modelo (log)", 2: "falló la generación (log)",
-                   3: "OOM de VRAM — usa el encoder en CPU (TEXT_ENCODER_DEVICE=cpu)"}
-        props.kimodo_status = f"Kimodo terminó: {reasons.get(rc, f'rc {rc}')}"
+        props.kimodo_status = _kimodo_error_message(props, rc)
         log.warn(f"kimodo subprocess rc={rc}")
     props.kimodo_running = False
     _tag_redraw_ui()
@@ -1250,9 +1352,10 @@ class PUPPET_OT_generate_motion(bpy.types.Operator):
             _close_kimodo_log()
             self.report({"ERROR"}, f"Python de Kimodo no encontrado: {py}")
             return {"CANCELLED"}
-        _KIMODO_STATE.update(proc=proc, out_path=stem + ".npz", scene=context.scene.name)
+        _KIMODO_STATE.update(proc=proc, out_path=stem + ".npz", scene=context.scene.name,
+                              t0=time.time(), done_ok=False)
         props.kimodo_running = True
-        props.kimodo_status = "Generando..."
+        props.kimodo_status = "Generando… 0 s"
         log.banner(f"GENERATE MOTION prompt='{props.kimodo_prompt}' model={props.kimodo_model}")
         if not bpy.app.timers.is_registered(_kimodo_poll_timer):
             bpy.app.timers.register(_kimodo_poll_timer, first_interval=0.25, persistent=True)
@@ -1311,6 +1414,62 @@ class PUPPET_OT_check_kimodo_deps(bpy.types.Operator):
         return {"CANCELLED"}
 
 
+class PUPPET_OT_autodetect_kimodo_python(bpy.types.Operator):
+    bl_idname = "puppet_mocap.autodetect_kimodo_python"
+    bl_label = "Detectar"
+    bl_description = "Busca automáticamente el Python de Kimodo (y valida que tenga Kimodo)"
+
+    def execute(self, context):
+        props = context.scene.puppet_mocap
+        found = _autodetect_kimodo_python(props)
+        if found:
+            props.kimodo_python_path = found
+            props.kimodo_status = "Python de Kimodo detectado"
+            self.report({"INFO"}, f"Detectado: {found}")
+        else:
+            props.kimodo_status = "No encontré el Python de Kimodo. Usa 'Elegir…'."
+            self.report({"WARNING"}, "No se encontró el Python de Kimodo")
+        return {"FINISHED"}
+
+
+class PUPPET_OT_play_kimodo_take(bpy.types.Operator):
+    bl_idname = "puppet_mocap.play_kimodo_take"
+    bl_label = "Ver la animación"
+    bl_description = "Activa la toma generada y salta al inicio"
+
+    def execute(self, context):
+        props = context.scene.puppet_mocap
+        set_take_playback(True)
+        props.play_take = True
+        context.scene.frame_current = int(_KIMODO_STATE.get("last_start", 1) or 1)
+        return {"FINISHED"}
+
+
+class PUPPET_OT_open_kimodo_license(bpy.types.Operator):
+    bl_idname = "puppet_mocap.open_kimodo_license"
+    bl_label = "Cómo obtenerlo"
+    bl_description = "Abre la página para solicitar acceso al modelo (cuenta de Hugging Face + aceptar la licencia de Meta Llama-3)"
+
+    def execute(self, context):
+        bpy.ops.wm.url_open(url="https://huggingface.co/meta-llama/Meta-Llama-3-8B-Instruct")
+        return {"FINISHED"}
+
+
+class PUPPET_OT_open_kimodo_log(bpy.types.Operator):
+    bl_idname = "puppet_mocap.open_kimodo_log"
+    bl_label = "Ver detalles"
+    bl_description = "Abre el log del subprocess de Kimodo"
+
+    def execute(self, context):
+        p = log.get_kimodo_log_path()
+        if sys.platform == "win32":
+            try:
+                os.startfile(p)
+            except OSError:
+                log.exception("open kimodo log")
+        return {"FINISHED"}
+
+
 CLASSES = (
     PUPPET_OT_start_capture,
     PUPPET_OT_stop_capture,
@@ -1327,4 +1486,8 @@ CLASSES = (
     PUPPET_OT_generate_motion,
     PUPPET_OT_cancel_generate,
     PUPPET_OT_check_kimodo_deps,
+    PUPPET_OT_autodetect_kimodo_python,
+    PUPPET_OT_play_kimodo_take,
+    PUPPET_OT_open_kimodo_license,
+    PUPPET_OT_open_kimodo_log,
 )
