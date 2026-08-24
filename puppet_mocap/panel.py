@@ -38,7 +38,13 @@ def _kimodo_checklist(ops_mod, props):
     if _kimodo_checklist_cache["data"] is not None and now - _kimodo_checklist_cache["t"] < 5.0:
         return _kimodo_checklist_cache["data"]
     py = props.kimodo_python_path
-    python_ok = bool(py) and ops_mod._kimodo_python_valid(py)
+    # No bloqueante (subprocess.Popen + poll): un check síncrono aquí
+    # colgaba Blender hasta 10s en cada redibujo con un venv real
+    # (torch+transformers tarda 25-35s en importar). Ver la nota en
+    # operators._kimodo_python_check_poll.
+    py_result = ops_mod._kimodo_python_check_poll(py) if py else False
+    python_ok = bool(py_result)
+    python_checking = bool(py) and py_result is None
     rig_ok = False
     arm_name = ""
     from .retarget import get_armature
@@ -47,8 +53,8 @@ def _kimodo_checklist(ops_mod, props):
         arm_name = arm.name
         ok, _ = ops_mod._validate_rig(props, write=False)
         rig_ok = ok
-    data = {"python_ok": python_ok, "kimodo_ok": python_ok,
-            "rig_ok": rig_ok, "arm_name": arm_name,
+    data = {"python_ok": python_ok, "python_checking": python_checking,
+            "kimodo_ok": python_ok, "rig_ok": rig_ok, "arm_name": arm_name,
             "model_ok": ops_mod._kimodo_encoder_ready()}
     _kimodo_checklist_cache["t"] = now
     _kimodo_checklist_cache["data"] = data
@@ -323,9 +329,12 @@ class PUPPET_PT_main(bpy.types.Panel):
                                  and ch["model_ok"])
                 if need_list:
                     if not ch["python_ok"]:
-                        rr = col.row(align=True)
-                        rr.label(text="✗ Python de Kimodo", icon="ERROR")
-                        rr.operator("puppet_mocap.autodetect_kimodo_python", text="Detectar")
+                        if ch.get("python_checking"):
+                            col.label(text="Verificando Python de Kimodo…", icon="TIME")
+                        else:
+                            rr = col.row(align=True)
+                            rr.label(text="✗ Python de Kimodo", icon="ERROR")
+                            rr.operator("puppet_mocap.autodetect_kimodo_python", text="Detectar")
                         col.prop(props, "kimodo_python_path", text="")
                     if ch["python_ok"] and not ch["rig_ok"]:
                         col.label(text="✗ Rig no encontrado. Importa un FBX de Mixamo.",

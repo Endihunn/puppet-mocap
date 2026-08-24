@@ -394,16 +394,64 @@ def _kimodo_log_tail_lower() -> str:
 
 
 def _kimodo_python_valid(path) -> bool:
-    """True si `path` es un python con kimodo importable (no solo que exista)."""
+    """True si `path` es un python con kimodo importable (no solo que exista).
+    BLOQUEANTE (subprocess.run) -- solo llamar desde un operator (click
+    explícito del usuario), nunca desde Panel.draw(). Un venv real con
+    torch+transformers puede tardar 25-35s en el primer import; ese costo es
+    aceptable como reacción a un botón, no como bloqueo silencioso del
+    redibujado. Ver `_kimodo_python_check_poll` para el equivalente no
+    bloqueante que sí es seguro en draw()."""
     if not path or not Path(path).exists():
         return False
     flags = 0x08000000 if sys.platform == "win32" else 0
     try:
         r = subprocess.run([str(path), "-c", "import kimodo"],
-                           capture_output=True, timeout=10, creationflags=flags)
+                           capture_output=True, timeout=60, creationflags=flags)
         return r.returncode == 0
     except (subprocess.TimeoutExpired, OSError):
         return False
+
+
+# Estado del check NO bloqueante de `import kimodo`. Un solo Popen en vuelo
+# por sesión; Panel.draw() lo lanza y sondea sin nunca esperar a que termine.
+_KIMODO_PYCHECK = {"path": None, "proc": None, "ok": None}
+
+
+def _kimodo_python_check_poll(path) -> bool | None:
+    """Equivalente no bloqueante de `_kimodo_python_valid`, seguro para
+    Panel.draw(). Devuelve True/False si ya se sabe, o None mientras el
+    subprocess sigue corriendo (o no se ha lanzado aún para este `path` --
+    lo lanza y devuelve None en la misma llamada).
+
+    Por qué existe: `_kimodo_checklist` (panel.py) llamaba a
+    `_kimodo_python_valid` -- subprocess.run síncrono -- en cada redibujo del
+    panel mientras la sección Kimodo estuviera desplegada. Con un venv rápido
+    eso no se notaba; con torch+transformers reales (25-35s de import) cada
+    redibujo colgaba Blender hasta 10s, repitiéndose cada vez que expiraba el
+    caché de 5s del checklist -- cualquier interacción con un menú redibuja
+    el panel y dispara el cuelgue.
+    """
+    if not path or not Path(path).exists():
+        return False
+    st = _KIMODO_PYCHECK
+    if st["path"] != path:
+        flags = 0x08000000 if sys.platform == "win32" else 0
+        try:
+            proc = subprocess.Popen([str(path), "-c", "import kimodo"],
+                                    stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL,
+                                    creationflags=flags)
+        except OSError:
+            proc = None
+        st.update(path=path, proc=proc, ok=(False if proc is None else None))
+    proc = st["proc"]
+    if proc is not None:
+        rc = proc.poll()
+        if rc is None:
+            return st["ok"]  # sigue corriendo -- último resultado conocido
+        st["ok"] = (rc == 0)
+        st["proc"] = None
+    return st["ok"]
 
 
 def _autodetect_kimodo_python(props) -> str:
