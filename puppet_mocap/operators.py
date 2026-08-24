@@ -272,9 +272,15 @@ def _tag_redraw_ui():
                         region.tag_redraw()
 
 
-def _validate_rig(props, include_body: bool = True, include_hands: bool = True):
+def _validate_rig(props, include_body: bool = True, include_hands: bool = True,
+                  write: bool = True):
     """Valida armature + prefijo de huesos. Compartido por start_capture y
-    generate_motion (K2). Devuelve (ok, error_msg)."""
+    generate_motion (K2). Devuelve (ok, error_msg).
+
+    `write=False` para llamarlo desde un Panel.draw(): Blender prohíbe escribir
+    en datos ID (aquí, props del Scene) durante el dibujado y la excepción
+    aborta el draw() entero.
+    """
     arm = retarget.get_armature()
     if arm is None:
         return False, "No hay un armature en la escena. Importa un FBX Mixamo primero."
@@ -282,8 +288,9 @@ def _validate_rig(props, include_body: bool = True, include_hands: bool = True):
         props.bone_prefix, include_body=include_body, include_hands=include_hands)
     if expected:
         matched = sum(1 for n in expected if n in arm.pose.bones)
-        props.bones_matched = matched
-        props.bones_total = len(expected)
+        if write:
+            props.bones_matched = matched
+            props.bones_total = len(expected)
         if matched == 0:
             hint = ""
             for bone in arm.data.bones:

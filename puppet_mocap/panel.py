@@ -45,7 +45,7 @@ def _kimodo_checklist(ops_mod, props):
     arm = get_armature()
     if arm is not None:
         arm_name = arm.name
-        ok, _ = ops_mod._validate_rig(props)
+        ok, _ = ops_mod._validate_rig(props, write=False)
         rig_ok = ok
     data = {"python_ok": python_ok, "kimodo_ok": python_ok,
             "rig_ok": rig_ok, "arm_name": arm_name}
@@ -298,7 +298,7 @@ class PUPPET_PT_main(bpy.types.Panel):
         # --- Kimodo (texto → animación, K2) --- Independiente de la captura.
         box = layout.box()
         row = box.row(align=True)
-        row.prop(props, "kimodo_show", text="Generar (Kimodo)", toggle=True, icon="MOTION_PATH")
+        row.prop(props, "kimodo_show", text="Generar (Kimodo)", toggle=True, icon="ANIM")
         if props.kimodo_show:
             # U1: autodetecta el Python de Kimodo una vez por sesión (cache negativo)
             ops_mod._maybe_autodetect_kimodo(props)
@@ -342,7 +342,7 @@ class PUPPET_PT_main(bpy.types.Panel):
                     col.label(
                         text=f"Duración {props.kimodo_duration:.0f}s > 10s: el modelo se "
                              f"entrena a máximo 10s; trocea el prompt en segmentos",
-                        icon="ERROR")
+                        icon="INFO")
                 # U4: Avanzado plegado
                 ar = col.row(align=True)
                 ar.prop(props, "kimodo_advanced", text="Avanzado", toggle=True,

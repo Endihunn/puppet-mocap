@@ -44,8 +44,19 @@ def _cache_arm(arm):
     # arm.pose puede ser None para un armature SIN huesos (Blender 5.x) —
     # no iterar en ese caso para no reventar get_armature().
     if arm.pose is not None:
-        for pb in arm.pose.bones:
-            pb.rotation_mode = "QUATERNION"
+        try:
+            for pb in arm.pose.bones:
+                pb.rotation_mode = "QUATERNION"
+        except AttributeError:
+            # Blender PROHÍBE escribir en datos ID desde un Panel.draw():
+            # "Writing to ID classes in this context is not allowed".
+            # El panel llama a get_armature() para mostrar el rig y el estado,
+            # y sin este guard la excepción aborta el draw() entero — la
+            # sección de Kimodo no llegaba a dibujarse nunca.
+            # No se pierde nada: el modo se fija igualmente en la próxima
+            # llamada fuera de draw (start_capture → fix_orientation) y en
+            # apply_pose, que son los caminos que de verdad lo necesitan.
+            pass
     # Guardar SOLO el nombre: un puntero al objeto bpy queda stale tras
     # undo/File>Open (los ID se re-asignan sin invalidar el wrapper Python y el
     # acceso cae a memoria liberada = crash, no excepción). El lookup por
