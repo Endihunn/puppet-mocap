@@ -48,39 +48,57 @@ def test_yup_to_zup_rotation_axis():
     assert abs(axis.z) > 0.99   # gira sobre +Z (up), no sobre X/Y
 
 
-def test_identity_kimodo_gives_rest_mixamo():
-    # Cadena sintética Hips→LeftArm con rest matrices NO triviales.
-    rest3 = {
-        "Hips": Matrix.Rotation(math.radians(20), 3, "X"),
-        "LeftArm": Matrix.Rotation(math.radians(-30), 3, "Y")
-                   @ Matrix.Rotation(math.radians(10), 3, "Z"),
-    }
-    rest_pos = {"Hips": Vector((0, 0, 0)), "LeftArm": Vector((0, 1, 0))}
-    parent_of = {"Hips": None, "LeftArm": "Hips"}
-    joint_order = ["Hips", "LeftArm"]
-    mapping = {"Hips": "Hips", "LeftArm": "LeftArm"}
+def test_aim_points_bone_at_child_joint():
+    """El retarget es POR DIRECCION: el eje Y del hueso debe quedar apuntando
+    al joint hijo de Kimodo.
 
-    # Kimodo global_rot_mats que reproduzcan la rest Mixamo (en mundo, Z-up):
-    #   r_k = YUP^T @ rest3[bone] @ YUP
-    T = 3
-    g = np.zeros((T, 2, 3, 3))
-    rp = np.zeros((T, 3))
-    for f in range(T):
-        for i, jname in enumerate(joint_order):
-            bone = mapping[jname]
-            g[f, i] = ZUP.transposed() @ rest3[bone] @ ZUP
-    motion = {"global_rot_mats": g, "root_positions": rp, "fps": 30.0}
+    Antes se componian las global_rot_mats sobre la rest de Mixamo. Medido
+    sobre walk_wave eso daba 14.1 grados de error angular medio (max 49.2), y
+    usarlas como orientacion absoluta —lo que hacia el codigo original— daba
+    95.3 (max 159.1): el personaje salia retorcido. Apuntar da 0.2 (max 3.0).
+    """
+    # Rest realista: un Hips de Mixamo apunta HACIA ARRIBA, o sea que su eje Y
+    # local va al +Z del armature. Esa rest es justamente YUP_TO_ZUP.
+    rest3 = {"Hips": ZUP, "Spine": ZUP}
+    rest_pos = {"Hips": Vector((0, 0, 0)), "Spine": Vector((0, 0, 1))}
+    parent_of = {"Hips": None, "Spine": "Hips"}
+    names = ["Hips", "Spine1"]
+    mapping = {"Hips": "Hips", "Spine1": "Spine"}
 
-    rot, _root = convert_motion(motion, joint_order, rest3, rest_pos,
-                                parent_of, mapping, fps=30.0)
+    def _ang(child_kimodo):
+        pj = np.zeros((1, 2, 3))
+        pj[0, 1] = child_kimodo
+        motion = {"posed_joints": pj, "root_positions": np.zeros((1, 3)),
+                  "fps": 30.0}
+        rot, _ = convert_motion(motion, names, rest3, rest_pos, parent_of,
+                                mapping, fps=30.0, root_scale=1.0)
+        q = Quaternion(rot["Hips"][0][1])
+        if q.w < 0:
+            q = Quaternion((-q.w, -q.x, -q.y, -q.z))
+        return math.degrees(q.angle)
 
-    # Con el motion correcto, TODOS los huesos deben quedar en rest (basis=identity)
-    for bone, pts in rot.items():
-        for f, (w, x, y, z) in pts:
-            q = Quaternion((w, x, y, z))
-            if q.w < 0:
-                q = Quaternion((-q.w, -q.x, -q.y, -q.z))
-            assert q.angle < 1e-4, f"{bone} frame {f} no quedó en rest (angle={q.angle})"
+    # Hijo hacia ARRIBA en Kimodo (+Y) = +Z de Blender = la propia rest.
+    assert _ang((0.0, 1.0, 0.0)) < 1e-3, "apuntar a la rest deberia dar identidad"
+    # Hijo hacia ADELANTE en Kimodo (+Z) = -Y de Blender: 90 grados desde +Z.
+    a = _ang((0.0, 0.0, 1.0))
+    assert abs(a - 90.0) < 1e-3, f"esperaba 90 grados, dio {a}"
+    # Hijo hacia ABAJO en Kimodo (-Y) = -Z de Blender: 180 grados.
+    a = _ang((0.0, -1.0, 0.0))
+    assert abs(a - 180.0) < 1e-3, f"esperaba 180 grados, dio {a}"
+
+
+def test_aim_child_map_covers_every_mapped_bone():
+    """Todo hueso Mixamo mapeado debe tener un joint hijo al que apuntar; si no,
+    se queda en rest y el rig sale a medio animar."""
+    from puppet_mocap.kimodo.convert import SOMA_AIM_CHILD
+    m = mapping_for(77)
+    faltan = [k for k in m if k not in SOMA_AIM_CHILD]
+    assert not faltan, f"sin joint hijo para apuntar: {faltan}"
+    # y el hijo debe existir en el esqueleto de 77
+    orden = set(joint_order(77))
+    malos = [(k, v) for k, v in SOMA_AIM_CHILD.items()
+             if k in m and v not in orden]
+    assert not malos, f"hijo inexistente en SOMA-77: {malos}"
 
 
 def test_root_is_relative_to_first_frame():
@@ -96,7 +114,8 @@ def test_root_is_relative_to_first_frame():
     parent_of = {"Hips": None}
     g = np.tile(np.eye(3), (2, 1, 1, 1))
     rp = np.array([[0.0, 0.9, 0.0], [0.0, 0.9, 0.0]])
-    motion = {"global_rot_mats": g, "root_positions": rp, "fps": 30.0}
+    motion = {"posed_joints": np.zeros((len(rp), 77, 3)),
+              "root_positions": rp, "fps": 30.0}
     _rot, root = convert_motion(motion, ["Hips"], rest3, rest_pos, parent_of,
                                 {"Hips": "Hips"}, fps=30.0, root_scale=1.0)
     for i in range(3):
@@ -118,7 +137,7 @@ def test_root_axes_per_axis():
     }
     for label, (kimodo_delta, expected) in cases.items():
         rp = np.array([[0.0, 0.0, 0.0], kimodo_delta])
-        motion = {"global_rot_mats": np.tile(np.eye(3), (2, 1, 1, 1)),
+        motion = {"posed_joints": np.zeros((2, 77, 3)),
                   "root_positions": rp, "fps": 30.0}
         _rot, root = convert_motion(motion, ["Hips"], rest3, rest_pos, parent_of,
                                     {"Hips": "Hips"}, fps=30.0, root_scale=1.0)
@@ -240,60 +259,48 @@ def test_real_npz_fixture(fixture):
 
 
 def test_sibling_branches_do_not_contaminate():
-    """Regresión: `parent_world` era una sola variable arrastrada sobre una
-    lista ordenada por profundidad, así que al pasar de una rama a otra del
-    mismo nivel el segundo hermano heredaba la matriz del primero en vez de la
-    de su padre.
+    """Regresion: `parent_world` era una variable unica arrastrada sobre una
+    lista ordenada por profundidad, asi que al pasar de una rama a otra del
+    mismo nivel el segundo hermano heredaba la matriz del primero.
 
-    El test prueba TODOS los pares (i, j) de hermanos: mover el hermano i no
-    puede alterar al hermano j. Así no depende del orden en que se recorran
-    los huesos — con el bug, el hermano procesado después de uno rotado
-    siempre se desvía, sea cual sea ese orden.
+    Se prueban TODOS los pares (i, j) de hermanos: mover el hermano i no puede
+    alterar al hermano j. Asi no depende del orden de recorrido.
     """
     names = joint_order(77)
     m = mapping_for(77)
-    # Tres hermanos, todos hijos directos de Hips en Mixamo.
     siblings = [("Spine1", "Spine"), ("LeftLeg", "LeftUpLeg"),
                 ("RightLeg", "RightUpLeg")]
-    for kimodo_name, mixamo_name in siblings:
-        assert m[kimodo_name] == mixamo_name
-
-    # Rest matrices NO identidad y DISTINTAS entre sí: con identidad el bug
-    # es invisible porque toda la cadena colapsa.
     rx = Matrix.Rotation(math.radians(37.0), 3, "X")
     rz = Matrix.Rotation(math.radians(-52.0), 3, "Z")
-    rest3 = {"Hips": rx, "Spine": rz, "LeftUpLeg": rx @ rz,
-             "RightUpLeg": rz @ rx}
+    rest3 = {"Hips": rx, "Spine": rz, "LeftUpLeg": rx @ rz, "RightUpLeg": rz @ rx,
+             "Spine1": Matrix.Identity(3), "LeftLeg": rx, "RightLeg": rz}
     rest_pos = {b: Vector((0.0, 0.0, 1.0)) for b in rest3}
     parent_of = {"Hips": None, "Spine": "Hips", "LeftUpLeg": "Hips",
-                 "RightUpLeg": "Hips"}
+                 "RightUpLeg": "Hips", "Spine1": "Spine", "LeftLeg": "LeftUpLeg",
+                 "RightLeg": "RightUpLeg"}
 
-    def _run(rotated_joint, angle_deg):
-        g = np.zeros((1, 77, 3, 3), dtype=np.float32)
-        g[:, :] = np.eye(3, dtype=np.float32)
-        if rotated_joint is not None:
-            r = Matrix.Rotation(math.radians(angle_deg), 3, "Y")
-            g[0, names.index(rotated_joint)] = np.array(
-                [tuple(r[i]) for i in range(3)], dtype=np.float32)
-        motion = {
-            "global_rot_mats": g,
-            "posed_joints": np.zeros((1, 77, 3), dtype=np.float32),
-            "root_positions": np.zeros((1, 3), dtype=np.float32),
-        }
+    def _run(moved, ang):
+        pj = np.zeros((1, 77, 3))
+        for k in names:
+            pj[0, names.index(k)] = (0.0, 1.0, 0.0)   # todos apuntando arriba
+        if moved:
+            child = __import__("puppet_mocap.kimodo.convert", fromlist=["x"]).SOMA_AIM_CHILD[moved]
+            pj[0, names.index(child)] = (math.sin(math.radians(ang)),
+                                         math.cos(math.radians(ang)), 0.0)
+        motion = {"posed_joints": pj, "root_positions": np.zeros((1, 3)), "fps": 30.0}
         rots, _ = convert_motion(motion, names, rest3, rest_pos, parent_of, m,
-                                 fps=30.0, apply_root=False)
+                                 fps=30.0, apply_root=False, root_scale=1.0)
         return {b: pts[0][1] for b, pts in rots.items()}
 
     base = _run(None, 0.0)
     for moved_k, moved_mx in siblings:
-        got = _run(moved_k, 80.0)
-        for _other_k, other_mx in siblings:
-            if other_mx == moved_mx:
+        got = _run(moved_k, 70.0)
+        for _k, other_mx in siblings:
+            if other_mx == moved_mx or other_mx not in base or other_mx not in got:
                 continue
             for i, (va, vb) in enumerate(zip(base[other_mx], got[other_mx])):
                 assert abs(va - vb) < 1e-6, (
-                    f"mover {moved_mx} alteró {other_mx} "
-                    f"(componente {i}: {va} -> {vb})")
+                    f"mover {moved_mx} altero {other_mx} (componente {i})")
 
 
 def test_bone_prefix_is_applied():

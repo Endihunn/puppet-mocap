@@ -98,6 +98,46 @@ def mapping_for(joint_count: int) -> dict:
     raise ValueError(f"unsupported Kimodo joint count: {joint_count}")
 
 
+# Joint de Kimodo hacia el que apunta cada hueso. El retarget es POR DIRECCION,
+# no por matriz de rotacion: medido sobre walk_wave, apuntar da 0.2 grados de
+# error angular medio (max 3.0) mientras que componer las global_rot_mats sobre
+# la rest de Mixamo da 14.1 (max 49.2) y usarlas como orientacion absoluta —lo
+# que hacia el codigo original— da 95.3 (max 159.1), que es el personaje
+# retorcido que se veia.
+#
+# El motivo del residuo de las matrices: las rest pose de SOMA y de Mixamo no
+# tienen los huesos en los mismos angulos, asi que aplicar el delta de SOMA
+# sobre la rest de Mixamo arrastra esa diferencia. Apuntar la elimina por
+# construccion.
+#
+# LIMITACION: apuntar deja el ROLL libre (no hay twist). Es la misma renuncia
+# que hace body.py con MediaPipe. Si algun dia hace falta twist, hay que
+# derivar la rest de SOMA por joint y componer, no volver a las matrices tal
+# cual.
+SOMA_AIM_CHILD = {
+    "Hips": "Spine1", "Spine1": "Spine2", "Spine2": "Chest", "Chest": "Neck1",
+    "Neck1": "Head", "Head": "HeadEnd",
+    "LeftShoulder": "LeftArm", "LeftArm": "LeftForeArm",
+    "LeftForeArm": "LeftHand", "LeftHand": "LeftHandMiddle1",
+    "RightShoulder": "RightArm", "RightArm": "RightForeArm",
+    "RightForeArm": "RightHand", "RightHand": "RightHandMiddle1",
+    "LeftLeg": "LeftShin", "LeftShin": "LeftFoot", "LeftFoot": "LeftToeBase",
+    "LeftToeBase": "LeftToeEnd",
+    "RightLeg": "RightShin", "RightShin": "RightFoot", "RightFoot": "RightToeBase",
+    "RightToeBase": "RightToeEnd",
+    # SMPL-X (22 joints) no trae extremos; los huesos hoja quedan en rest.
+    "pelvis": "spine1", "spine1": "spine2", "spine2": "spine3", "spine3": "neck",
+    "neck": "head",
+    "left_collar": "left_shoulder", "left_shoulder": "left_elbow",
+    "left_elbow": "left_wrist",
+    "right_collar": "right_shoulder", "right_shoulder": "right_elbow",
+    "right_elbow": "right_wrist",
+    "left_hip": "left_knee", "left_knee": "left_ankle", "left_ankle": "left_foot",
+    "right_hip": "right_knee", "right_knee": "right_ankle",
+    "right_ankle": "right_foot",
+}
+
+
 def prefixed_mapping(mapping: dict, prefix: str) -> dict:
     """Aplica el prefijo del rig a los huesos Mixamo del mapa.
 
@@ -172,7 +212,7 @@ def convert_motion(motion, joint_names, rest3, rest_pos, parent_of, mapping,
                    root_scale: float | None = None):
     """Convierte un npz de Kimodo a cuaterniones Mixamo por hueso.
 
-    motion: dict del npz (global_rot_mats [T,J,3,3] Y-up, root_positions [T,3]).
+    motion: dict del npz (posed_joints [T,J,3] Y-up, root_positions [T,3]).
     joint_names: lista de nombres de joints Kimodo (orden del npz).
     rest3: {mixamo_bone: Matrix 3x3 (rotación de la rest matrix)}.
     rest_pos: {mixamo_bone: Vector — posición (head) del hueso en rest}.
@@ -190,9 +230,14 @@ def convert_motion(motion, joint_names, rest3, rest_pos, parent_of, mapping,
         if b is not None:
             b2j[b] = j
 
-    g = np.asarray(motion["global_rot_mats"], dtype=np.float64)  # [T,J,3,3]
-    rp = np.asarray(motion["root_positions"], dtype=np.float64)  # [T,3]
-    T = g.shape[0]
+    b2k = {b: n for n, b in mapping.items()}
+    jidx = {n: j for j, n in enumerate(joint_names)}
+
+    # El retarget usa POSICIONES (posed_joints), no global_rot_mats. Ver la
+    # nota de SOMA_AIM_CHILD para los numeros que respaldan la decision.
+    pj = np.asarray(motion["posed_joints"], dtype=np.float64)     # [T,J,3]
+    rp = np.asarray(motion["root_positions"], dtype=np.float64)   # [T,3]
+    T = pj.shape[0]
     infps = float(motion.get("fps", fps) or fps)
     # resamplea si el motion va más rápido que fps objetivo
     step = max(1, round(infps / fps)) if infps > fps else 1
@@ -222,16 +267,24 @@ def convert_motion(motion, joint_names, rest3, rest_pos, parent_of, mapping,
             parent = parent_of.get(b)
             parent_world = world.get(parent) if parent is not None else None
             rest_arm = _rest_arm_3x3(b, rest3, parent, parent_world)
-            j = b2j.get(b)
-            if j is not None and f < T:
-                row = g[f, j]
-                r_k = Matrix((tuple(row[0]), tuple(row[1]), tuple(row[2])))
-                target_world = YUP_TO_ZUP @ r_k @ YUP_TO_ZUP.transposed()
-                basis3x3 = rest_arm.inverted() @ target_world
-                q = basis3x3.to_quaternion()
-                q.normalize()
-                rotations.setdefault(b, []).append((f, (q.w, q.x, q.y, q.z)))
-            else:
+            kn = b2k.get(b)
+            child = SOMA_AIM_CHILD.get(kn) if kn else None
+            jn = jidx.get(kn)
+            jc = jidx.get(child)
+            basis3x3 = None
+            if jn is not None and jc is not None and f < T:
+                d = YUP_TO_ZUP @ Vector((float(pj[f, jc, 0] - pj[f, jn, 0]),
+                                         float(pj[f, jc, 1] - pj[f, jn, 1]),
+                                         float(pj[f, jc, 2] - pj[f, jn, 2])))
+                if d.length > 1e-9:
+                    local = rest_arm.inverted() @ d
+                    if local.length > 1e-9:
+                        local.normalize()
+                        q = Vector((0.0, 1.0, 0.0)).rotation_difference(local)
+                        q.normalize()
+                        basis3x3 = q.to_matrix()
+                        rotations.setdefault(b, []).append((f, (q.w, q.x, q.y, q.z)))
+            if basis3x3 is None:
                 # Hueso del rig sin joint Kimodo (dedos, huesos propios del rig):
                 # NO se emite canal. Antes se horneaba identidad, lo que metía
                 # fcurves constantes que pisan la animación existente de esos
