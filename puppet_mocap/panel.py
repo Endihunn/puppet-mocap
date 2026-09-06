@@ -359,6 +359,8 @@ class PUPPET_PT_main(bpy.types.Panel):
                 ar.prop(props, "kimodo_advanced", text="Avanzado", toggle=True,
                         icon="PREFERENCES")
                 if props.kimodo_advanced:
+                    col.prop(props, "kimodo_foot_lock")
+                    col.prop(props, "kimodo_ground_snap")
                     col.prop(props, "kimodo_model")
                     rr = col.row(align=True)
                     rr.prop(props, "kimodo_seed_use", text="Resultado repetible")

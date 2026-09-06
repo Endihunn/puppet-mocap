@@ -16,3 +16,4 @@ __pycache__/
 .pytest_cache/
 test_project.blend
 test_project.blend1
+.venv-test/

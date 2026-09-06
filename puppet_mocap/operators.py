@@ -588,9 +588,46 @@ def _kimodo_bake(props, out_path) -> str:
         for i in range(3):
             channels[(path, i, bone)] = [(start + f, v[i]) for f, v in pts]
     action = _bake_channels(arm, "OBJECT", "PuppetTake", channels, owner=arm.name)
+    _baked_state["body"] = action.name   # el postproceso la re-asigna por nombre
+    n_frames = int(motion["posed_joints"].shape[0])
+
+    # Postproceso de la toma: clavar el pie de apoyo y aterrizar. Ambos mueven
+    # la cadera con la action asignada (Blender hace la FK). Medido en
+    # gvhmr-mocap: patinaje 0.192 -> 0.034 u; pie más bajo -0.449 -> +0.065.
+    root_bone = mapping.get("Hips") or mapping.get("pelvis")
+    rest3_root = rest3.get(root_bone)
+    if root_bone and rest3_root is not None and (props.kimodo_foot_lock
+                                                 or props.kimodo_ground_snap):
+        from .kimodo import postbake
+        _assign_action(arm, "body", True)
+        try:
+            if props.kimodo_foot_lock:
+                # el nombre de joint del pie depende del esqueleto (SOMA/SMPL-X)
+                feet = [n for n in ("LeftToeBase", "RightToeBase",
+                                    "left_foot", "right_foot")
+                        if n in joint_names]
+                bone_of = {n: mapping[n][len(props.bone_prefix):]
+                           for n in feet if n in mapping}
+                if bone_of:
+                    contacts = postbake.contacts_from_source(
+                        motion["posed_joints"], joint_names, list(bone_of))
+                    moved = postbake.foot_lock(
+                        action, arm, props.bone_prefix, root_bone, rest3_root,
+                        contacts, bone_of, start, n_frames)
+                    if moved:
+                        log.info(f"foot lock: corrección acumulada {moved:.3f}")
+            if props.kimodo_ground_snap:
+                dz = postbake.ground_offset(arm, props.bone_prefix, start, n_frames)
+                if postbake.apply_ground_offset(action, arm, root_bone, rest3_root, dz):
+                    log.info(f"ground snap: {dz:+.3f} (espacio de armature)")
+        except Exception:
+            log.exception("postproceso de la toma de Kimodo")
+        finally:
+            _assign_action(arm, "body", False)
+
     _baked_state["body"] = action.name
     _KIMODO_STATE["last_start"] = start
-    props.kimodo_result_frames = int(motion["posed_joints"].shape[0])
+    props.kimodo_result_frames = n_frames
     return action.name
 
 

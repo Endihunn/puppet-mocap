@@ -330,6 +330,26 @@ class PuppetMocapProperties(bpy.types.PropertyGroup):
         description="Reutiliza la misma semilla para reproducir exactamente el mismo resultado",
         default=False,
     )
+    kimodo_foot_lock: bpy.props.BoolProperty(
+        name="Clavar pie de apoyo",
+        description=(
+            "Cancela el patinaje del pie en contacto moviendo la cadera (sin IK). "
+            "El retarget conserva las direcciones de la fuente pero usa las "
+            "longitudes del rig, así que el pie no cae donde la fuente lo "
+            "clavaba. El contacto se deduce de la velocidad del pie"
+        ),
+        default=True,
+    )
+    kimodo_ground_snap: bpy.props.BoolProperty(
+        name="Aterrizar",
+        description=(
+            "Sube la toma para que el pie más bajo toque el suelo. La traslación "
+            "de raíz es relativa al primer frame, así que la altura absoluta se "
+            "pierde y en rigs con el Hips cerca del origen el personaje queda "
+            "enterrado"
+        ),
+        default=True,
+    )
     kimodo_advanced: bpy.props.BoolProperty(
         name="Avanzado",
         default=False,

@@ -350,3 +350,49 @@ def test_end_to_end_with_prefixed_rig():
             moved = True
             break
     assert moved, "ninguna rotación varía: el rig saldría congelado"
+
+
+def test_pelvis_sigue_el_yaw_de_la_fuente():
+    """REGRESION: apuntar la pelvis (casi vertical) a su hijo deja el giro
+    alrededor de la vertical indeterminado, asi que el personaje NUNCA giraba.
+
+    Medido antes del fix, rotando la fuente: 45 grados -> 48 de error;
+    90 -> 94; 180 -> 179. O sea el rig se quedaba encarando siempre igual.
+    """
+    from puppet_mocap.kimodo.convert import TWO_VEC_ORIENT  # noqa: F401
+    path = DATA / "kimodo_walk_wave.npz"
+    with np.load(path, allow_pickle=False) as z:
+        base = {k: np.asarray(z[k]) for k in z.files}
+    j = int(base["posed_joints"].shape[1])
+    names = joint_order(j)
+    jidx = {n: i for i, n in enumerate(names)}
+
+    bones = ("Hips", "Spine", "LeftUpLeg", "RightUpLeg", "Spine1", "Spine2", "Neck")
+    rest3 = {b: Matrix.Identity(3) for b in bones}
+    rest_pos = {b: Vector((0, 0, 1.0)) for b in bones}
+    parent_of = {"Hips": None, "Spine": "Hips", "LeftUpLeg": "Hips",
+                 "RightUpLeg": "Hips", "Spine1": "Spine", "Spine2": "Spine1",
+                 "Neck": "Spine2"}
+    mapping = {k: v for k, v in mapping_for(j).items() if v in rest3}
+
+    for deg in (45.0, 90.0, 180.0):
+        th = math.radians(deg)
+        # giro alrededor del eje Y de Kimodo (up)
+        R = np.array([[math.cos(th), 0, math.sin(th)],
+                      [0, 1, 0],
+                      [-math.sin(th), 0, math.cos(th)]])
+        motion = dict(base)
+        motion["posed_joints"] = base["posed_joints"] @ R.T
+        pj = motion["posed_joints"]
+        rot, _ = convert_motion(motion, names, rest3, rest_pos, parent_of,
+                                mapping, fps=30.0, apply_root=False, root_scale=1.0)
+        f, q = rot["Hips"][0]
+        lat = ZUP @ Vector(tuple(float(pj[f, jidx["LeftLeg"], k]
+                                       - pj[f, jidx["RightLeg"], k]) for k in range(3)))
+        lat.normalize()
+        src = math.degrees(math.atan2(lat.y, lat.x))
+        m = Quaternion(q).to_matrix()
+        xa = Vector((m[0][0], m[1][0], m[2][0]))   # eje X del hueso = lateral
+        rig = math.degrees(math.atan2(xa.y, xa.x))
+        err = abs((rig - src + 180) % 360 - 180)
+        assert err < 2.0, f"giro {deg}: el rig da {rig:.1f} y la fuente {src:.1f} ({err:.1f} de error)"

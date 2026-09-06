@@ -207,6 +207,58 @@ def _chained_world(bone, rest3, parent, parent_world, basis3x3):
     return pw @ rel @ basis3x3
 
 
+# Huesos que NO se orientan apuntando a su joint hijo sino con DOS vectores
+# (up + lateral), para no perder el YAW.
+#
+# El problema: apuntar un hueso casi vertical (pelvis, columna) a su hijo deja
+# indeterminado el giro alrededor de la vertical, porque `rotation_difference`
+# toma el arco más corto. Medido sobre kimodo_walk_wave rotando la fuente:
+#   giro impuesto 45 grados -> 48 de error;  90 -> 94;  180 -> 179.
+# O sea el personaje NUNCA giraba: caminaba de lado encarando siempre igual.
+#
+# `up_to` es el joint hacia el que va el eje Y local; `lat` = (derecho,
+# izquierdo) define el eje X (izquierda anatómica del personaje).
+# OJO con los nombres SOMA: "LeftLeg" es el MUSLO (ver mapping), así que la
+# lateral de caderas es RightLeg->LeftLeg.
+TWO_VEC_ORIENT = {
+    # SOMA-77 / SOMA-30
+    "Hips": {"up_to": "Chest", "lat": ("RightLeg", "LeftLeg")},
+    "Spine1": {"up_to": "Spine2", "lat": ("RightShoulder", "LeftShoulder")},
+    "Spine2": {"up_to": "Chest", "lat": ("RightShoulder", "LeftShoulder")},
+    "Chest": {"up_to": "Neck1", "lat": ("RightShoulder", "LeftShoulder")},
+    # SMPL-X 22
+    "pelvis": {"up_to": "spine3", "lat": ("right_hip", "left_hip")},
+    "spine1": {"up_to": "spine2", "lat": ("right_shoulder", "left_shoulder")},
+    "spine2": {"up_to": "spine3", "lat": ("right_shoulder", "left_shoulder")},
+    "spine3": {"up_to": "neck", "lat": ("right_shoulder", "left_shoulder")},
+}
+
+
+def _two_vec_basis(rest_arm, up_arm, lat_arm):
+    """Basis 3x3 LOCAL (en rest basis) con Y_local = up y X_local = lat
+    (ortogonalizado). None si los vectores son degenerados."""
+    try:
+        inv = rest_arm.inverted()
+    except ValueError:
+        return None
+    up = inv @ up_arm
+    lat = inv @ lat_arm
+    if up.length < 1e-9 or lat.length < 1e-9:
+        return None
+    up.normalize()
+    lat = lat - lat.dot(up) * up
+    if lat.length < 1e-9:
+        return None
+    lat.normalize()
+    z = lat.cross(up)
+    if z.length < 1e-9:
+        return None
+    z.normalize()
+    return Matrix(((lat.x, up.x, z.x),
+                   (lat.y, up.y, z.y),
+                   (lat.z, up.z, z.z)))
+
+
 def convert_motion(motion, joint_names, rest3, rest_pos, parent_of, mapping,
                    fps: float = 30.0, apply_root: bool = True,
                    root_scale: float | None = None):
@@ -272,7 +324,26 @@ def convert_motion(motion, joint_names, rest3, rest_pos, parent_of, mapping,
             jn = jidx.get(kn)
             jc = jidx.get(child)
             basis3x3 = None
-            if jn is not None and jc is not None and f < T:
+
+            # Orientación por DOS vectores (pelvis / columna): recupera el yaw.
+            tv = TWO_VEC_ORIENT.get(kn) if kn else None
+            if tv is not None and jn is not None and f < T:
+                ju = jidx.get(tv["up_to"])
+                ja = jidx.get(tv["lat"][0])
+                jb = jidx.get(tv["lat"][1])
+                if None not in (ju, ja, jb):
+                    up = YUP_TO_ZUP @ Vector(tuple(
+                        float(pj[f, ju, i] - pj[f, jn, i]) for i in range(3)))
+                    lat = YUP_TO_ZUP @ Vector(tuple(
+                        float(pj[f, jb, i] - pj[f, ja, i]) for i in range(3)))
+                    M = _two_vec_basis(rest_arm, up, lat)
+                    if M is not None:
+                        basis3x3 = M
+                        q = M.to_quaternion()
+                        q.normalize()
+                        rotations.setdefault(b, []).append((f, (q.w, q.x, q.y, q.z)))
+
+            if basis3x3 is None and jn is not None and jc is not None and f < T:
                 d = YUP_TO_ZUP @ Vector((float(pj[f, jc, 0] - pj[f, jn, 0]),
                                          float(pj[f, jc, 1] - pj[f, jn, 1]),
                                          float(pj[f, jc, 2] - pj[f, jn, 2])))
