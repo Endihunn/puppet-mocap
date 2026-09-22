@@ -96,7 +96,7 @@ class PuppetMocapProperties(bpy.types.PropertyGroup):
     )
     play_take: bpy.props.BoolProperty(
         name="Reproducir toma",
-        description="Re-asigna la última toma horneada al rig para reproducirla. Desactívalo para volver a la captura en vivo.",
+        description="Asigna la última toma horneada al rig y la reproduce. Desactívalo para pausar y volver a la captura en vivo.",
         default=False,
         options={"SKIP_SAVE"},
         update=_play_take_update,

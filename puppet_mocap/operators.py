@@ -151,13 +151,25 @@ def _assign_action(id_data, kind: str, play: bool):
 
 def set_take_playback(play: bool):
     """Toggle "Reproducir toma": re-asigna la última toma (cuerpo + cara) al
-    armature objetivo, o la desasigna para volver a la captura en vivo."""
+    armature objetivo Y reproduce la animación (o pausa + desasigna para
+    volver a la captura en vivo). Antes solo asignaba — el usuario tenía que
+    darle Play a mano en la línea de tiempo (P1, hallazgo #3)."""
     arm = retarget.get_armature()
     if arm is not None:
         _assign_action(arm, "body", play)
         mesh = retarget.face.get_cached_mesh(arm)
         if mesh is not None and mesh.data.shape_keys is not None:
             _assign_action(mesh.data.shape_keys, "face", play)
+    screen = bpy.context.screen
+    if screen is None:
+        return
+    # animation_play() es un TOGGLE — llamarlo sin guardia mientras ya
+    # reproduce lo pausaría en vez de mantenerlo reproduciendo.
+    if play:
+        if not screen.is_animation_playing:
+            bpy.ops.screen.animation_play()
+    elif screen.is_animation_playing:
+        bpy.ops.screen.animation_cancel(restore_frame=False)
 
 
 def _load_calibration(props):
@@ -1756,13 +1768,13 @@ class PUPPET_OT_autodetect_kimodo_python(bpy.types.Operator):
 class PUPPET_OT_play_kimodo_take(bpy.types.Operator):
     bl_idname = "puppet_mocap.play_kimodo_take"
     bl_label = "Ver la animación"
-    bl_description = "Activa la toma generada y salta al inicio"
+    bl_description = "Activa la toma generada, salta al inicio y reproduce"
 
     def execute(self, context):
         props = context.scene.puppet_mocap
+        context.scene.frame_current = int(_KIMODO_STATE.get("last_start", 1) or 1)
         set_take_playback(True)
         props.play_take = True
-        context.scene.frame_current = int(_KIMODO_STATE.get("last_start", 1) or 1)
         return {"FINISHED"}
 
 
