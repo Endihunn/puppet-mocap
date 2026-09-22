@@ -48,6 +48,29 @@ def test_yup_to_zup_rotation_axis():
     assert abs(axis.z) > 0.99   # gira sobre +Z (up), no sobre X/Y
 
 
+def test_input_to_armature_rotation_is_applied_after_yup_to_zup():
+    """Kimodo también debe respetar la rotación del objeto Armature."""
+    motion = {
+        "posed_joints": np.array([[[0.0, 0.0, 0.0],
+                                   [0.0, 1.0, 0.0]]]),  # +Y Kimodo = +Z canónico
+        "root_positions": np.zeros((1, 3)),
+    }
+    names = ["Hips", "Spine1"]
+    rest3 = {"Hips": Matrix.Identity(3)}
+    rest_pos = {"Hips": Vector((0, 0, 0))}
+    parent_of = {"Hips": None}
+    mapping = {"Hips": "Hips"}
+    input_to_armature = Matrix.Rotation(-math.pi / 2.0, 3, "X")
+
+    rotations, _ = convert_motion(
+        motion, names, rest3, rest_pos, parent_of, mapping,
+        apply_root=False, root_scale=1.0,
+        input_to_armature=input_to_armature,
+    )
+    q = Quaternion(rotations["Hips"][0][1])
+    assert q.angle < 1e-6  # +Z canónico → +Y local, la rest ya apunta +Y
+
+
 def test_aim_points_bone_at_child_joint():
     """El retarget es POR DIRECCION: el eje Y del hueso debe quedar apuntando
     al joint hijo de Kimodo.

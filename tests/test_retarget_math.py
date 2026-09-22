@@ -14,7 +14,7 @@ mathutils = pytest.importorskip("mathutils")
 from mathutils import Matrix, Quaternion, Vector  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from puppet_mocap.retarget import common  # noqa: E402
+from puppet_mocap.retarget import body, common  # noqa: E402
 
 
 def _neutral_landmarks():
@@ -45,6 +45,17 @@ def test_mp_to_arm_convention():
     _assert_close(v.x, 1.0)
     _assert_close(v.y, 3.0)   # arm.y = mp.z
     _assert_close(v.z, -2.0)  # arm.z = -mp.y
+
+
+def test_canonical_space_follows_armature_object_rotation():
+    """Una rotación de objeto de 90° en X no debe convertir arriba en frente."""
+    import types
+
+    obj_matrix = Matrix.Rotation(math.pi / 2.0, 4, "X") @ Matrix.Scale(0.01, 4)
+    arm = types.SimpleNamespace(matrix_world=obj_matrix)
+
+    local = common.canonical_to_armature_space(arm, Vector((0.0, 0.0, 1.0)))
+    assert local.normalized().dot(Vector((0.0, 1.0, 0.0))) > 0.999
 
 
 def test_calibrate_pose_landmarks_roundtrip_identity():
@@ -108,3 +119,38 @@ def test_root_translation_basis_conversion():
     # si alguien revierte el fix y suma D directamente, este assert falla.
     for D in (Vector((0, 1, 0)), Vector((0, 0, 1))):
         assert (Minv @ D - D).length > 0.5
+
+
+def test_live_foot_lock_pins_a_single_support_foot():
+    """El apoyo estable corrige Hips en arm-space cuando el pie deriva."""
+    import types
+
+    rest = Matrix.Identity(4)
+    hips = types.SimpleNamespace(
+        bone=types.SimpleNamespace(matrix_local=rest),
+        location=Vector((0.0, 0.0, 0.0)),
+    )
+    foot = types.SimpleNamespace(head=Vector((0.0, 0.0, 0.0)))
+    arm = types.SimpleNamespace(
+        pose=types.SimpleNamespace(bones={"mixamorig:LeftFoot": foot}),
+    )
+    pts = [Vector((0.0, 0.0, 0.0)) for _ in range(33)]
+    vis = [1.0] * 33
+    common.reset_foot_lock()
+
+    # Primera muestra: arma el historial; segunda: entra en contacto.
+    body._apply_foot_lock(
+        arm, hips, pts, vis, {"L": Vector((0.0, 0.0, 0.0))},
+        "mixamorig:", 0.5, 0.02, False, Vector(),
+    )
+    body._apply_foot_lock(
+        arm, hips, pts, vis, {"L": Vector((0.0, 0.0, 0.0))},
+        "mixamorig:", 0.5, 0.02, False, Vector(),
+    )
+
+    moved = body._apply_foot_lock(
+        arm, hips, pts, vis, {"L": Vector((1.0, 0.0, 0.0))},
+        "mixamorig:", 0.5, 0.02, False, Vector(),
+    )
+    assert moved == 1
+    assert (hips.location - Vector((-1.0, 0.0, 0.0))).length < 1e-6

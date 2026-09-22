@@ -165,50 +165,62 @@ def world_landmarks_to_list(world_lms) -> list:
 
 
 def hand_relative(hand_world_lms) -> list:
-    """Landmarks de mano RELATIVOS a la muñeca (sin sumar la posición del pose).
+    """Landmarks de mano RELATIVOS a la muñeca (restando landmark 0).
     La posición absoluta se suma DESPUÉS del One Euro (P2-2): filtrar en espacio
-    absoluto abría el cutoff adaptativo por el desplazamiento del brazo y dejaba
-    de suavizar los dedos justo cuando más ruido hay."""
-    return [[_r5(lm.x), _r5(lm.y), _r5(lm.z)] for lm in hand_world_lms]
+    relativo asegura que el filtro One Euro trabaje sobre la forma y orientación de
+    la mano sin verse afectado por el desplazamiento global del brazo."""
+    if not hand_world_lms:
+        return []
+    w = hand_world_lms[0]
+    wx = getattr(w, "x", w[0] if isinstance(w, (list, tuple)) else 0.0)
+    wy = getattr(w, "y", w[1] if isinstance(w, (list, tuple)) else 0.0)
+    wz = getattr(w, "z", w[2] if isinstance(w, (list, tuple)) else 0.0)
+    out = []
+    for lm in hand_world_lms:
+        x = getattr(lm, "x", lm[0] if isinstance(lm, (list, tuple)) else 0.0)
+        y = getattr(lm, "y", lm[1] if isinstance(lm, (list, tuple)) else 0.0)
+        z = getattr(lm, "z", lm[2] if isinstance(lm, (list, tuple)) else 0.0)
+        out.append([_r5(x - wx), _r5(y - wy), _r5(z - wz)])
+    return out
 
 
 def detect_hands_categorized(h_result, pose_image_lms, pose_world_lms):
     """Devuelve dict {'L': {'lm': [21 lms relativos a la muñeca],
-    'wrist': (x,y,z) del pose, 'hd': str}, 'R': {...}}.
+    'wrist': (x,y,z) del pose, 'hd': str, 'score': float}, 'R': {...}}.
 
     CON pose: empareja cada mano con pose[15]=LEFT_WRIST / pose[16]=RIGHT_WRIST
-    por PROXIMIDAD en image-space. NO usa `handedness` para el L/R: la
-    convención "viewer's perspective" de la Tasks API cambia con el mirror de
-    la imagen y algunos drivers espejan sin avisar; la proximidad a las
-    muñecas anatómicas del Pose es estable.
+    por PROXIMIDAD en image-space. Conserva score de handedness y ancla a la
+    muñeca filtrada del cuerpo.
 
     SIN pose (captura manos-solo o cuerpo perdido): fallback por handedness.
-    Los labels de MediaPipe asumen imagen ESPEJADA; nosotros inferimos sin
-    espejar, así que label 'Right' = mano físicamente izquierda → 'L'.
     """
     out = {}
     if not h_result.hand_landmarks or not h_result.hand_world_landmarks:
         return out
 
-    def _hd(idx):
+    def _hd_info(idx):
         try:
-            return h_result.handedness[idx][0].category_name
+            entry = h_result.handedness[idx][0]
+            score = float(getattr(entry, "score", 1.0))
+            return entry.category_name, score
         except (IndexError, AttributeError, TypeError):
-            return None
+            return None, 0.0
 
     if pose_image_lms is None or pose_world_lms is None:
         # Fallback sin ancla corporal
         for i, _ in enumerate(h_result.hand_landmarks):
-            hd = _hd(i)
+            hd, score = _hd_info(i)
             side = "L" if hd == "Right" else "R"
             if side in out:
-                side = "R" if side == "L" else "L"
-                if side in out:
+                other = "R" if side == "L" else "L"
+                if other in out:
                     continue
+                side = other
             out[side] = {
                 "lm": hand_relative(h_result.hand_world_landmarks[i]),
                 "wrist": (0.0, 0.0, 0.0),
                 "hd": hd,
+                "score": score,
             }
         return out
 
@@ -229,22 +241,29 @@ def detect_hands_categorized(h_result, pose_image_lms, pose_world_lms):
 
     used = set()
     for idx, d_l, d_r in candidates:
-        side = "L" if d_l < d_r else "R"
+        primary = "L" if d_l < d_r else "R"
+        d_assigned = d_l if primary == "L" else d_r
+        d_other = d_r if primary == "L" else d_l
+
+        side = primary
         if side in used:
-            side = "R" if side == "L" else "L"
-            if side in used:
+            other = "R" if side == "L" else "L"
+            if other in used or d_other > 0.25:
                 continue
+            side = other
         used.add(side)
 
-        if side == "L":
-            wrist_pose = (pose_world_lms[15].x, pose_world_lms[15].y, pose_world_lms[15].z)
-        else:
-            wrist_pose = (pose_world_lms[16].x, pose_world_lms[16].y, pose_world_lms[16].z)
+        wrist_target = pose_world_lms[15] if side == "L" else pose_world_lms[16]
+        wx = getattr(wrist_target, "x", wrist_target[0] if isinstance(wrist_target, (list, tuple)) else 0.0)
+        wy = getattr(wrist_target, "y", wrist_target[1] if isinstance(wrist_target, (list, tuple)) else 0.0)
+        wz = getattr(wrist_target, "z", wrist_target[2] if isinstance(wrist_target, (list, tuple)) else 0.0)
 
+        hd, score = _hd_info(idx)
         out[side] = {
             "lm": hand_relative(h_result.hand_world_landmarks[idx]),
-            "wrist": wrist_pose,
-            "hd": _hd(idx),
+            "wrist": (_r5(wx), _r5(wy), _r5(wz)),
+            "hd": hd,
+            "score": score,
         }
 
     return out
@@ -445,7 +464,12 @@ def main():
                     cv2.circle(frame, (int(lm.x * w), int(lm.y * h)), 1, (255, 255, 0), -1)
 
             # ---- Payload ----
-            payload: dict = {"t": "pose"}
+            payload: dict = {
+                "t": "pose",
+                "v": 2,
+                "ts": _r5(time.time()),
+                "seq": n_frames,
+            }
 
             if has_pose and result.pose_world_landmarks:
                 lms = world_landmarks_to_list(result.pose_world_landmarks[0])
@@ -453,10 +477,10 @@ def main():
                                  for x, y, z, v in pose_euro(lms, now)]
 
             if h_result and h_result.hand_world_landmarks:
-                if has_pose and result.pose_world_landmarks:
+                if has_pose and "lm" in payload:
                     raw_hands = detect_hands_categorized(
                         h_result, result.pose_landmarks[0],
-                        result.pose_world_landmarks[0])
+                        payload["lm"])
                 else:
                     raw_hands = detect_hands_categorized(h_result, None, None)
                 hands_data = {}
@@ -469,6 +493,7 @@ def main():
                         "lm": [[_r5(x + wx), _r5(y + wy), _r5(z + wz)]
                                for x, y, z, _ in lm_smooth],
                         "hd": data.get("hd"),
+                        "score": data.get("score", 1.0),
                     }
                 if hands_data:
                     payload["hands"] = hands_data

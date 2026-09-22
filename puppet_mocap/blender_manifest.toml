@@ -4,7 +4,7 @@
 schema_version = "1.0.0"
 
 id = "puppet_mocap"
-version = "0.4.0"
+version = "0.4.2"
 name = "Puppet Mocap"
 tagline = "Mocap de webcam (MediaPipe) para armatures Mixamo"
 maintainer = "darth"
@@ -18,4 +18,4 @@ tags = ["Animation", "Motion Capture"]
 
 permissions = ["network", "files"]
 
-description = "Webcam motion capture: MediaPipe (pose + manos + cara) -> armature Mixamo, en vivo y con grabación de tomas. MediaPipe corre en un proceso Python externo que manda JSON por TCP local."
+description = "Webcam motion capture: MediaPipe (pose + manos + cara) -> armature Mixamo, con foot lock opcional y grabación de tomas. MediaPipe corre en un proceso Python externo que manda JSON por TCP local."

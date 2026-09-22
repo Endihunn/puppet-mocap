@@ -274,23 +274,22 @@ def _tag_redraw_ui():
 
 
 def _armature_transform_warning(arm) -> str:
-    """K2/P2-4: Mixamo FBX trae su Y-up nativo; Blender lo reconcilia rotando
-    el OBJETO, no los datos de hueso. Tanto convert.py (Kimodo) como
-    body._apply_root_translation asumen que el espacio armature-local ya es
-    el Z-up de Blender -- sin 'Object > Apply > Rotation' tras importar, la
-    traslación de raíz sale proyectada al eje equivocado (el personaje se
-    hunde en vez de caminar hacia adelante). Las rotaciones de hueso no se
-    ven afectadas, solo la traslación de la raíz.
+    """Detecta transformaciones de objeto que el retarget no puede resolver.
+
+    La rotación del objeto Armature sí está soportada: el retarget convierte
+    el espacio canónico a los ejes locales del rig antes de orientar los
+    huesos. Solo una escala no uniforme (o degenerada) queda como advertencia.
     """
     if arm is None:
         return ""
-    angle = arm.matrix_local.to_quaternion().angle
-    if angle < 0.01:  # ~0.6°, ruido de precisión de punto flotante
+    scale = arm.matrix_world.to_scale()
+    magnitudes = [abs(float(v)) for v in scale]
+    if min(magnitudes) <= 1e-8:
+        return "El armature tiene una escala degenerada; aplica Scale antes de capturar."
+    if max(magnitudes) / min(magnitudes) <= 1.01:
         return ""
-    deg = math.degrees(angle)
-    return (f"El armature tiene una rotación sin aplicar ({deg:.0f}°): "
-            f"la traslación de raíz puede salir en el eje equivocado. "
-            f"Corregí con Object > Apply > Rotation (o All Transforms).")
+    return ("El armature tiene escala no uniforme; aplica Object > Apply > Scale "
+            "para que los ejes y las longitudes del retarget sean consistentes.")
 
 
 def _validate_rig(props, include_body: bool = True, include_hands: bool = True,
@@ -573,7 +572,9 @@ def _kimodo_bake(props, out_path) -> str:
     joint_names = kconv.joint_order(j)
     mapping = kconv.prefixed_mapping(kconv.mapping_for(j), props.bone_prefix)
     rotations, root = kconv.convert_motion(
-        motion, joint_names, rest3, rest_pos, parent_of, mapping, fps=30.0)
+        motion, joint_names, rest3, rest_pos, parent_of, mapping, fps=30.0,
+        input_to_armature=retarget.common.canonical_to_armature_matrix(arm),
+    )
 
     start = max(1, bpy.context.scene.frame_current)
     channels = {}
@@ -946,8 +947,22 @@ def _drain_tick():
                 enable_face=props.enable_face,
                 root_translation=props.enable_root_translation,
                 root_scale=props.root_translation_scale,
+                foot_lock=props.foot_lock,
+                foot_lock_speed=props.foot_lock_speed,
+                ground_mode=props.ground_mode,
+                ground_z=props.ground_z,
+                ground_object=props.ground_object,
+                sole_offset=props.sole_offset,
+                foot_lock_sensitivity=props.foot_lock_sensitivity,
                 debug_hands=props.debug_hands,
+                sample_time=m.get("ts", m.get("_rx", now)),
+                foot_lock_mode=props.foot_lock_mode,
             )
+            telem = retarget.body.get_foot_telemetry()
+            if telem:
+                props.foot_state_left = telem.get("state_l", "SWING")
+                props.foot_state_right = telem.get("state_r", "SWING")
+                props.foot_ground_detected = telem.get("ground_z", 0.0)
         except Exception as e:
             # Mensaje corto para la UI; traceback al log con rate limit
             props.last_error = f"apply_pose: {e}"
@@ -970,7 +985,7 @@ def _drain_tick():
                 return 0.02
             snap = retarget.snapshot_pose(
                 arm, props.bone_prefix, include_body, include_hands, include_face,
-                include_root=props.enable_root_translation)
+                include_root=props.enable_root_translation or props.foot_lock)
             st["samples"].append((elapsed, snap["bones"], snap["shapes"], snap["locs"]))
             last_frame = st["start_frame"] + int(round(elapsed * st["fps"]))
 
@@ -1251,6 +1266,136 @@ class PUPPET_OT_reset_rig(bpy.types.Operator):
         log.warn("reset_rig: sin armature")
         self.report({"ERROR"}, "No hay armature en la escena")
         return {"CANCELLED"}
+
+
+class PUPPET_OT_calibrate_ground(bpy.types.Operator):
+    bl_idname = "puppet_mocap.calibrate_ground"
+    bl_label = "Calibrar suelo desde pose"
+    bl_description = "Establece la altura Z del suelo a partir del pie más bajo en la pose actual"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        props = context.scene.puppet_mocap
+        _sync_target(props)
+        arm = retarget.get_armature()
+        if arm is None:
+            self.report({"ERROR"}, "No hay armature en la escena")
+            return {"CANCELLED"}
+        prefix = props.bone_prefix
+        feet = [
+            arm.pose.bones.get(f"{prefix}LeftFoot"),
+            arm.pose.bones.get(f"{prefix}RightFoot"),
+        ]
+        feet = [pb for pb in feet if pb is not None]
+        if not feet:
+            self.report({"ERROR"}, "No se encontraron huesos Foot en el armature")
+            return {"CANCELLED"}
+        min_z = None
+        for pb in feet:
+            z_w = (arm.matrix_world @ pb.head).z
+            if min_z is None or z_w < min_z:
+                min_z = z_w
+        if min_z is not None:
+            props.ground_z = min_z
+            self.report({"INFO"}, f"Suelo calibrado a Z = {min_z:.4f} m")
+            return {"FINISHED"}
+        return {"CANCELLED"}
+
+
+class PUPPET_OT_lock_current_take(bpy.types.Operator):
+    bl_idname = "puppet_mocap.lock_current_take"
+    bl_label = "Clavar pies de la toma"
+    bl_description = (
+        "Duplica la action activa y hornea la corrección del Hips e IK de piernas "
+        "para que los pies de apoyo no patinen"
+    )
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        props = context.scene.puppet_mocap
+        if server.is_running() or props.is_recording:
+            self.report({"ERROR"}, "Detén la captura antes de procesar la toma")
+            return {"CANCELLED"}
+        _sync_target(props)
+        arm = retarget.get_armature()
+        action = (arm.animation_data.action
+                  if arm is not None and arm.animation_data is not None else None)
+        if arm is None:
+            self.report({"ERROR"}, "No hay armature en la escena")
+            return {"CANCELLED"}
+        if action is None:
+            self.report({"ERROR"}, "El armature no tiene una action activa")
+            return {"CANCELLED"}
+
+        from .retarget import foot_lock as foot_lock_mod
+        new_action, stats = foot_lock_mod.lock_action(
+            arm,
+            action,
+            prefix=props.bone_prefix,
+            ground_mode=props.ground_mode,
+            ground_z=props.ground_z if props.ground_mode == "PLANE_Z" else None,
+            ground_object=props.ground_object if props.ground_mode == "OBJECT_RAYCAST" else None,
+            sole_offset=props.sole_offset,
+            sensitivity=props.foot_lock_sensitivity,
+        )
+        if new_action is None:
+            self.report({"ERROR"}, "No encontré Hips y al menos un hueso Foot")
+            return {"CANCELLED"}
+        new_action["puppet_mocap_take"] = True
+        new_action["puppet_mocap_owner"] = arm.name
+        _baked_state["body"] = new_action.name
+        props.play_take = True
+
+        locked_frames = int(stats)
+        left_frames = stats.get("locked_frames_left", 0) if isinstance(stats, dict) else 0
+        right_frames = stats.get("locked_frames_right", 0) if isinstance(stats, dict) else 0
+        rms = stats.get("rms_residual", 0.0) if isinstance(stats, dict) else 0.0
+        max_res = stats.get("max_residual", 0.0) if isinstance(stats, dict) else 0.0
+        g_mode = stats.get("ground_mode", props.ground_mode) if isinstance(stats, dict) else props.ground_mode
+        unreachable = stats.get("unreachable_frames", 0) if isinstance(stats, dict) else 0
+
+        log.info(
+            f"foot lock de toma: action='{new_action.name}' frames={locked_frames} "
+            f"(L:{left_frames} R:{right_frames}) RMS={rms:.4f} Max={max_res:.4f} "
+            f"suelo={g_mode} fuera_alcance={unreachable}"
+        )
+        if max_res > 0.005:
+            self.report(
+                {"WARNING"},
+                f"Toma procesada con residual ({rms * 1000:.1f} mm RMS, {max_res * 1000:.1f} mm max; suelo {g_mode})",
+            )
+        else:
+            self.report(
+                {"INFO"},
+                f"Toma duplicada y pies clavados ({locked_frames} frames: L:{left_frames}, R:{right_frames}; suelo {g_mode}; RMS {rms * 1000:.1f} mm)",
+            )
+        return {"FINISHED"}
+
+
+class PUPPET_OT_foot_lock_now(bpy.types.Operator):
+    bl_idname = "puppet_mocap.foot_lock_now"
+    bl_label = "Clavar ahora"
+    bl_description = "Fuerza el bloqueo duro (LOCKED) de los pies según el modo seleccionado"
+
+    def execute(self, context):
+        from .retarget import common
+        common._state["foot_force_lock"] = True
+        log.info("foot lock: forzar bloqueo duro manual (LOCKED)")
+        self.report({"INFO"}, "Bloqueo duro forzado (LOCKED)")
+        return {"FINISHED"}
+
+
+class PUPPET_OT_foot_release(bpy.types.Operator):
+    bl_idname = "puppet_mocap.foot_release"
+    bl_label = "Soltar"
+    bl_description = "Libera inmediatamente el bloqueo de ambos pies (SWING libre)"
+
+    def execute(self, context):
+        from .retarget import common
+        common._state["foot_force_release"] = True
+        log.info("foot lock: liberación manual inmediata (SWING)")
+        self.report({"INFO"}, "Pies liberados a balanceo (SWING)")
+        return {"FINISHED"}
 
 
 class PUPPET_OT_calibrate(bpy.types.Operator):
@@ -1633,12 +1778,41 @@ class PUPPET_OT_open_kimodo_log(bpy.types.Operator):
         return {"FINISHED"}
 
 
+class PUPPET_OT_enable_preserve_volume(bpy.types.Operator):
+    bl_idname = "puppet_mocap.enable_preserve_volume"
+    bl_label = "Activar Preserve Volume"
+    bl_description = "Activa Preserve Volume en los modificadores Armature de las mallas vinculadas al rig para prevenir pérdida de sección en codo y muñeca"
+
+    def execute(self, context):
+        arm = retarget.get_armature()
+        if arm is None:
+            self.report({"WARNING"}, "No hay un rig activo seleccionado")
+            return {"CANCELLED"}
+        updated = 0
+        for obj in bpy.data.objects:
+            if obj.type == "MESH":
+                for m in obj.modifiers:
+                    if m.type == "ARMATURE" and m.object == arm:
+                        if not m.use_deform_preserve_volume:
+                            m.use_deform_preserve_volume = True
+                            updated += 1
+        if updated > 0:
+            self.report({"INFO"}, f"Preserve Volume activado en {updated} objeto(s)")
+        else:
+            self.report({"INFO"}, "Preserve Volume ya estaba activo o no se encontraron mallas dependientes")
+        return {"FINISHED"}
+
+
 CLASSES = (
     PUPPET_OT_start_capture,
     PUPPET_OT_stop_capture,
     PUPPET_OT_toggle_record,
     PUPPET_OT_clear_keyframes,
     PUPPET_OT_reset_rig,
+    PUPPET_OT_lock_current_take,
+    PUPPET_OT_foot_lock_now,
+    PUPPET_OT_foot_release,
+    PUPPET_OT_calibrate_ground,
     PUPPET_OT_calibrate,
     PUPPET_OT_clear_calibration,
     PUPPET_OT_detect_prefix,
@@ -1653,4 +1827,5 @@ CLASSES = (
     PUPPET_OT_play_kimodo_take,
     PUPPET_OT_open_kimodo_license,
     PUPPET_OT_open_kimodo_log,
+    PUPPET_OT_enable_preserve_volume,
 )

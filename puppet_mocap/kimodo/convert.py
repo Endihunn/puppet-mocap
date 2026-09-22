@@ -207,6 +207,13 @@ def _chained_world(bone, rest3, parent, parent_world, basis3x3):
     return pw @ rel @ basis3x3
 
 
+def _to_armature_space(vector, input_to_armature):
+    """Convierte un vector Z-up canónico a los ejes locales del armature."""
+    if input_to_armature is None:
+        return vector
+    return input_to_armature @ vector
+
+
 # Huesos que NO se orientan apuntando a su joint hijo sino con DOS vectores
 # (up + lateral), para no perder el YAW.
 #
@@ -261,7 +268,8 @@ def _two_vec_basis(rest_arm, up_arm, lat_arm):
 
 def convert_motion(motion, joint_names, rest3, rest_pos, parent_of, mapping,
                    fps: float = 30.0, apply_root: bool = True,
-                   root_scale: float | None = None):
+                   root_scale: float | None = None,
+                   input_to_armature: Matrix | None = None):
     """Convierte un npz de Kimodo a cuaterniones Mixamo por hueso.
 
     motion: dict del npz (posed_joints [T,J,3] Y-up, root_positions [T,3]).
@@ -271,6 +279,8 @@ def convert_motion(motion, joint_names, rest3, rest_pos, parent_of, mapping,
     parent_of: {mixamo_bone: bone_padre | None}.
     mapping: {joint_name: mixamo_bone}.
     fps: fps objetivo (resamplea si el del motion difiere).
+    input_to_armature: rotación Z-up canónico → ejes locales del armature.
+        None conserva el comportamiento histórico para rigs ya alineados.
 
     Devuelve (rotations, root):
         rotations: {mixamo_bone: [(frame, (w,x,y,z))]} — quaternion en rest basis.
@@ -332,10 +342,18 @@ def convert_motion(motion, joint_names, rest3, rest_pos, parent_of, mapping,
                 ja = jidx.get(tv["lat"][0])
                 jb = jidx.get(tv["lat"][1])
                 if None not in (ju, ja, jb):
-                    up = YUP_TO_ZUP @ Vector(tuple(
-                        float(pj[f, ju, i] - pj[f, jn, i]) for i in range(3)))
-                    lat = YUP_TO_ZUP @ Vector(tuple(
-                        float(pj[f, jb, i] - pj[f, ja, i]) for i in range(3)))
+                    up = _to_armature_space(
+                        YUP_TO_ZUP @ Vector(tuple(
+                            float(pj[f, ju, i] - pj[f, jn, i])
+                            for i in range(3))),
+                        input_to_armature,
+                    )
+                    lat = _to_armature_space(
+                        YUP_TO_ZUP @ Vector(tuple(
+                            float(pj[f, jb, i] - pj[f, ja, i])
+                            for i in range(3))),
+                        input_to_armature,
+                    )
                     M = _two_vec_basis(rest_arm, up, lat)
                     if M is not None:
                         basis3x3 = M
@@ -344,9 +362,12 @@ def convert_motion(motion, joint_names, rest3, rest_pos, parent_of, mapping,
                         rotations.setdefault(b, []).append((f, (q.w, q.x, q.y, q.z)))
 
             if basis3x3 is None and jn is not None and jc is not None and f < T:
-                d = YUP_TO_ZUP @ Vector((float(pj[f, jc, 0] - pj[f, jn, 0]),
+                d = _to_armature_space(
+                    YUP_TO_ZUP @ Vector((float(pj[f, jc, 0] - pj[f, jn, 0]),
                                          float(pj[f, jc, 1] - pj[f, jn, 1]),
-                                         float(pj[f, jc, 2] - pj[f, jn, 2])))
+                                         float(pj[f, jc, 2] - pj[f, jn, 2]))),
+                    input_to_armature,
+                )
                 if d.length > 1e-9:
                     local = rest_arm.inverted() @ d
                     if local.length > 1e-9:
@@ -364,7 +385,10 @@ def convert_motion(motion, joint_names, rest3, rest_pos, parent_of, mapping,
             world[b] = _chained_world(b, rest3, parent, parent_world, basis3x3)
 
         if apply_root and f < T:
-            posbl = YUP_TO_ZUP @ Vector((rp[f, 0], rp[f, 1], rp[f, 2]))
+            posbl = _to_armature_space(
+                YUP_TO_ZUP @ Vector((rp[f, 0], rp[f, 1], rp[f, 2])),
+                input_to_armature,
+            )
             if root_ref is None:
                 root_ref = posbl.copy()
             # RELATIVO al primer frame, no absoluto: Kimodo canonicaliza su

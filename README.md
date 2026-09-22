@@ -54,6 +54,9 @@ Panel: `View3D > N > Puppet Mocap`.
 - **Puerto ocupado**: cambia el puerto en Settings (otro Blender o una sesión anterior lo tiene).
 - **Todo tiembla**: sube *Suavizado de rotación*; para lag, bájalo.
 - **El personaje siempre inclinado**: **Calibrar postura** (la webcam ve desde abajo/arriba).
+- **El títere se acuesta al capturar**: las versiones actuales compensan la rotación del objeto Armature; si el rig tiene escala no uniforme, aplica `Object > Apply > Scale`.
+- **Los pies patinan al capturar**: en el módulo **Cuerpo**, activa **Clavar pies al suelo**. Detecta el apoyo por la velocidad del pie y corrige el Hips; si la webcam tiene jitter, sube **Umbral**.
+- **Una toma ya grabada patina**: con la captura detenida, pulsa **Clavar toma actual**. Duplica la action activa y aplica el bloqueo sin destruir la original.
 - Logs: `%TEMP%\puppet_mocap.log` (addon) y `%TEMP%\puppet_mocap_capture.log` (subprocess). El botón **Abrir Log** abre ambos.
 
 ## Desarrollo

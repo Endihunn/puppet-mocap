@@ -20,20 +20,25 @@ def _root_fcurves(action, arm, root_bone: str):
     esc = bpy.utils.escape_identifier(root_bone)
     path = f'pose.bones["{esc}"].location'
     slot = None
-    ad = arm.animation_data
-    if ad is not None and ad.action is action:
-        slot = ad.action_slot
+    ad = getattr(arm, "animation_data", None)
+    if ad is not None and getattr(ad, "action", None) is action:
+        slot = getattr(ad, "action_slot", None)
     out = []
-    for layer in action.layers:
-        for strip in layer.strips:
-            bags = getattr(strip, "channelbags", None)
-            if bags is None:
-                bag = strip.channelbag(slot) if slot is not None else None
-                bags = [bag] if bag is not None else []
-            for cb in bags:
-                for fc in cb.fcurves:
-                    if fc.data_path == path and fc.array_index in (0, 1, 2):
-                        out.append(fc)
+    if hasattr(action, "layers"):
+        for layer in action.layers:
+            for strip in layer.strips:
+                bags = getattr(strip, "channelbags", None)
+                if bags is None:
+                    bag = strip.channelbag(slot) if slot is not None else None
+                    bags = [bag] if bag is not None else []
+                for cb in bags:
+                    for fc in cb.fcurves:
+                        if fc.data_path == path and fc.array_index in (0, 1, 2):
+                            out.append(fc)
+    elif hasattr(action, "fcurves"):
+        for fc in action.fcurves:
+            if fc.data_path == path and fc.array_index in (0, 1, 2):
+                out.append(fc)
     return out
 
 
@@ -49,9 +54,12 @@ def _shift_keys(fc, delta_by_frame, frame_start, n):
         else:
             d = delta_by_frame[i_ax]
         kp.co[1] += d
-        kp.handle_left[1] += d
-        kp.handle_right[1] += d
-    fc.update()
+        if hasattr(kp, "handle_left"):
+            kp.handle_left[1] += d
+        if hasattr(kp, "handle_right"):
+            kp.handle_right[1] += d
+    if hasattr(fc, "update"):
+        fc.update()
 
 
 # --- aterrizar -------------------------------------------------------------
@@ -78,8 +86,9 @@ def ground_offset(arm, prefix: str, frame_start: int, n_frames: int,
             scene.frame_set(f)
             for pb in bones:
                 for pt in (pb.head, pb.tail):
-                    if lowest is None or pt.z < lowest:
-                        lowest = pt.z
+                    w_pt = arm.matrix_world @ pt
+                    if lowest is None or w_pt.z < lowest:
+                        lowest = w_pt.z
     finally:
         scene.frame_set(prev)
     return 0.0 if lowest is None else -lowest
@@ -88,9 +97,12 @@ def ground_offset(arm, prefix: str, frame_start: int, n_frames: int,
 def apply_ground_offset(action, arm, root_bone: str, rest3_root, offset_z: float) -> bool:
     if abs(offset_z) < 1e-6:
         return False
+    world_offset = Vector((0.0, 0.0, offset_z))
+    arm_3x3 = arm.matrix_world.to_3x3()
     try:
-        delta = rest3_root.inverted() @ Vector((0.0, 0.0, offset_z))
-    except ValueError:
+        local_offset = arm_3x3.inverted() @ world_offset
+        delta = rest3_root.inverted() @ local_offset
+    except (ValueError, AttributeError):
         return False
     fcurves = _root_fcurves(action, arm, root_bone)
     for fc in fcurves:
@@ -155,7 +167,7 @@ def foot_lock(action, arm, prefix: str, root_bone: str, rest3_root,
     try:
         for i in range(n):
             scene.frame_set(frame_start + i)
-            pos.append({jn: pb.head.copy() for jn, _, pb in pairs})
+            pos.append({jn: (arm.matrix_world @ pb.head).copy() for jn, _, pb in pairs})
     finally:
         scene.frame_set(prev)
 
@@ -172,11 +184,13 @@ def foot_lock(action, arm, prefix: str, root_bone: str, rest3_root,
 
     if max(v.length for v in corr) < 1e-6:
         return 0.0
+    arm_3x3 = arm.matrix_world.to_3x3()
     try:
-        inv = rest3_root.inverted()
-    except ValueError:
+        inv_arm = arm_3x3.inverted()
+        inv_rest = rest3_root.inverted()
+    except (ValueError, AttributeError):
         return 0.0
-    local = [inv @ c for c in corr]
+    local = [inv_rest @ (inv_arm @ c) for c in corr]
     for fc in _root_fcurves(action, arm, root_bone):
         _shift_keys(fc, lambda i: local[i], frame_start, n)
     return float(corr[-1].length)

@@ -145,6 +145,9 @@ class PUPPET_PT_main(bpy.types.Panel):
             sub = box.column(align=True)
             sub.prop(props, "swap_hands")
             sub.prop(props, "flip_palm_normal")
+            sub.operator("puppet_mocap.enable_preserve_volume",
+                         text="Preserve Volume (Codo/Muñeca)",
+                         icon="MOD_ARMATURE")
 
         # --- Módulos: Cara ---
         box = _module_box(layout, props, "Cara", "USER",

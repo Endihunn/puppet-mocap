@@ -165,6 +165,28 @@ def mp_to_arm(lm) -> Vector:
     return Vector((x, z, -y))
 
 
+def canonical_to_armature_matrix(arm) -> Matrix:
+    """Devuelve la rotación de captura canónica → local del armature.
+
+    MediaPipe y Kimodo llegan en un espacio canónico Z-up. Un FBX puede tener
+    el objeto Armature rotado para colocarlo en la escena (por ejemplo, el rig
+    actual tiene 90° en X), así que ese espacio no siempre coincide con los
+    ejes locales de los huesos. Solo se extrae la rotación del objeto: la escala
+    sigue resolviéndose con la escala del rig en el cálculo de raíz/torso.
+    """
+    if arm is None:
+        return Matrix.Identity(3)
+    try:
+        return arm.matrix_world.to_quaternion().inverted().to_matrix()
+    except (AttributeError, TypeError, ValueError):
+        return Matrix.Identity(3)
+
+
+def canonical_to_armature_space(arm, vector: Vector) -> Vector:
+    """Convierte un vector Z-up canónico al espacio local del armature."""
+    return canonical_to_armature_matrix(arm) @ vector
+
+
 def lm_visibility(lm) -> float:
     """Visibilidad del landmark de Pose (4to componente). Manos/cara no la
     traen (MediaPipe la deja en 0 para esas tasks) → default 1.0."""
@@ -442,12 +464,15 @@ class ScalarOneEuro:
 
 
 def reset_smoothing():
+    _state["tick_t"] = 0.0
     _state["quat_filters"] = {}
     _state["scalar_filters"] = {}
     _state["last_axis_dump"] = False
     _state["first_hand_logged"] = False
     _state["face_warned"] = False
     _state["palm_normal_prev"] = {}
+    _state["palm_hysteresis"] = {}
+    _state["forearm_oriented"] = set()
     _state["palm_diag_Left"] = False
     _state["palm_diag_Right"] = False
     _state["face_mesh_name"] = None
@@ -455,12 +480,41 @@ def reset_smoothing():
     _state["face_mesh_miss_t"] = 0.0
     _state["kf_names"] = {}
     _state["arm_world_3x3"] = {}
+    _state["arm_twist_unwrapped"] = {"Left": 0.0, "Right": 0.0}
+    _state["arm_twist_prev_valid"] = {"Left": False, "Right": False}
+    _state["arm_parent_world_3x3"] = {}
+    _state["arm_dirs"] = {}
+    _state["arm_chain_oriented"] = set()
     _state["auto_swap_active"] = False
     _state["root_hip_ref"] = None
     _state["root_loc_ref"] = None
+    reset_foot_lock()
+
+
+def reset_foot_lock():
+    """Olvida contactos y correcciones acumuladas de los pies en vivo."""
+    _state["foot_lock"] = {
+        "prev": {},
+        "contact": {},
+        "anchor": {},
+        # Corrección arm-space añadida a la traslación base del Hips cuando
+        # root translation y foot lock se usan juntos.
+        "bias": Vector((0.0, 0.0, 0.0)),
+    }
+    _state["foot_sms"] = {}
+    _state["foot_telemetry"] = {
+        "state_l": "SWING",
+        "state_r": "SWING",
+        "weight_l": 0.0,
+        "weight_r": 0.0,
+        "ground_z": 0.0,
+    }
 
 
 def set_tick(t: float, rotation_smooth: float):
+    last_t = _state.get("tick_t", 0.0)
+    if t <= last_t:
+        t = last_t + 1e-4
     _state["tick_t"] = t
     _state["smooth_params"] = _smooth_strength_to_params(rotation_smooth)
 
@@ -527,6 +581,52 @@ def smooth_scalar(key: str, value: float) -> float:
 
 def _vec_is_finite(v: Vector) -> bool:
     return math.isfinite(v.x) and math.isfinite(v.y) and math.isfinite(v.z)
+
+
+def decompose_swing_twist(q: Quaternion,
+                          axis: Vector = Vector((0.0, 1.0, 0.0))) -> tuple[Quaternion, Quaternion, float]:
+    """Descompone una rotación q en q_swing * q_twist respecto al eje local unitario axis.
+
+    q_twist gira exclusivamente alrededor de axis.
+    q_swing rota axis a su orientación final sin torsión axial.
+    Devuelve (q_swing, q_twist, twist_angle_rad).
+    Garantiza reconstrucción q_swing @ q_twist == q con error angular < 1e-5 rad.
+    """
+    if axis.length < 1e-6:
+        ax = Vector((0.0, 1.0, 0.0))
+    else:
+        ax = axis.normalized()
+
+    q_norm = _safe_quaternion(q)
+    if q_norm.w < 0.0:
+        q_norm = Quaternion((-q_norm.w, -q_norm.x, -q_norm.y, -q_norm.z))
+
+    v_part = Vector((q_norm.x, q_norm.y, q_norm.z))
+    dot = v_part.dot(ax)
+    proj = dot * ax
+
+    q_twist_raw = Quaternion((q_norm.w, proj.x, proj.y, proj.z))
+    mag = q_twist_raw.magnitude
+    if mag < 1e-7:
+        q_twist = Quaternion((1.0, 0.0, 0.0, 0.0))
+    else:
+        q_twist = q_twist_raw.normalized()
+
+    q_swing = (q_norm @ q_twist.inverted()).normalized()
+
+    sin_half = Vector((q_twist.x, q_twist.y, q_twist.z)).dot(ax)
+    cos_half = q_twist.w
+    angle = 2.0 * math.atan2(sin_half, cos_half)
+    angle = (angle + math.pi) % (2.0 * math.pi) - math.pi
+
+    return q_swing, q_twist, angle
+
+
+def unwrap_angle(angle: float, prev_angle: float) -> float:
+    """Desenrolla un ángulo de forma continua respecto al valor previo, eliminando saltos en +-pi."""
+    diff = angle - prev_angle
+    diff = (diff + math.pi) % (2.0 * math.pi) - math.pi
+    return prev_angle + diff
 
 
 def aim(pose_bone, target_arm_dir: Vector,

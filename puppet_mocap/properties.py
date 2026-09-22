@@ -216,6 +216,89 @@ class PuppetMocapProperties(bpy.types.PropertyGroup):
         description="Traslada el Hips según el desplazamiento del mid-hip: el personaje se desplaza al caminar en vez de quedar clavado en el origen (P2-4). Requiere Cuerpo activo.",
         default=False,
     )
+    foot_lock: bpy.props.BoolProperty(
+        name="Clavar pies al suelo",
+        description=(
+            "Detecta cuándo cada pie está apoyado y corrige la traslación de cadera "
+            "e IK de piernas para eliminar el deslizamiento sin afectar el balanceo."
+        ),
+        default=True,
+    )
+    foot_lock_speed: bpy.props.FloatProperty(
+        name="Umbral de apoyo",
+        description=(
+            "Desplazamiento máximo de un pie por muestra para considerarlo "
+            "apoyado. Súbelo si la webcam tiene mucho jitter."
+        ),
+        default=0.02,
+        min=0.002,
+        max=0.2,
+        precision=3,
+    )
+    ground_mode: bpy.props.EnumProperty(
+        name="Modo de suelo",
+        description="Cómo se define y detecta la superficie del suelo para el apoyo de pies",
+        items=[
+            ("PLANE_Z", "Plano Z", "Plano horizontal a una altura fija"),
+            ("OBJECT_RAYCAST", "Raycast Objeto", "Colisión vertical contra objeto o escenario"),
+            ("AUTO_CALIBRATED", "Auto-calibrado", "Estimación automática por percentil bajo"),
+        ],
+        default="PLANE_Z",
+    )
+    ground_z: bpy.props.FloatProperty(
+        name="Altura suelo Z",
+        description="Altura Z del plano de suelo en coordenadas de mundo",
+        default=0.0,
+        precision=4,
+    )
+    ground_object: bpy.props.PointerProperty(
+        type=bpy.types.Object,
+        name="Objeto de suelo",
+        description="Objeto de referencia para colisión y raycast de suelo",
+    )
+    sole_offset: bpy.props.FloatProperty(
+        name="Offset suela",
+        description="Separación de la planta del pie respecto al suelo (grosor de calzado)",
+        default=0.0,
+        min=-0.1,
+        max=0.1,
+        precision=4,
+    )
+    foot_lock_sensitivity: bpy.props.FloatProperty(
+        name="Sensibilidad",
+        description="Multiplicador para los umbrales de velocidad y distancia de apoyo (1.0 = normal)",
+        default=1.0,
+        min=0.2,
+        max=3.0,
+        precision=2,
+    )
+    foot_lock_mode: bpy.props.EnumProperty(
+        name="Modo de apoyo",
+        description="Control de bloqueo de pies: detección automática o forzado manual",
+        items=[
+            ("AUTO", "Automático", "Detección automática de contacto e intención de despegue"),
+            ("BOTH", "Ambos", "Bloqueo duro forzado de ambos pies (Hard Plant bilateral)"),
+            ("LEFT", "Izquierdo", "Bloqueo duro forzado del pie izquierdo (apoyo unilateral)"),
+            ("RIGHT", "Derecho", "Bloqueo duro forzado del pie derecho (apoyo unilateral)"),
+        ],
+        default="AUTO",
+    )
+    foot_state_left: bpy.props.StringProperty(
+        name="Estado pie izq",
+        description="Estado actual del pie izquierdo",
+        default="SWING",
+    )
+    foot_state_right: bpy.props.StringProperty(
+        name="Estado pie der",
+        description="Estado actual del pie derecho",
+        default="SWING",
+    )
+    foot_ground_detected: bpy.props.FloatProperty(
+        name="Suelo detectado",
+        description="Cota Z de suelo detectada",
+        default=0.0,
+        precision=4,
+    )
     root_translation_scale: bpy.props.FloatProperty(
         name="Escala de traslación",
         description="Multiplicador manual sobre la escala automática (altura del rig / altura observada del torso). 1.0 = automático.",

@@ -46,6 +46,7 @@ def get_keyframe_bones(prefix: str = "mixamorig:",
         out += body.bone_names(prefix)
     if include_hands:
         out += hands.bone_names(prefix)
+    out = list(dict.fromkeys(out))
     common._state["kf_names"][key] = out
     return out
 
@@ -101,10 +102,11 @@ def snapshot_pose(arm, prefix: str,
             bones[name] = (q.w, q.x, q.y, q.z)
     locs = {}
     if include_root and include_body:
-        pb = arm.pose.bones.get(f"{prefix}Hips")
+        root_name = f"{prefix}Hips"
+        pb = arm.pose.bones.get(root_name)
         if pb is not None:
             l = pb.location
-            locs["Hips"] = (l.x, l.y, l.z)
+            locs[root_name] = (l.x, l.y, l.z)
     shapes = face.snapshot_values(arm) if include_face else {}
     return {"bones": bones, "shapes": shapes, "locs": locs}
 
@@ -118,7 +120,13 @@ def apply_pose(landmarks=None, *, hands_data=None, face_data=None,
                enable_body: bool = True, enable_hands: bool = True,
                enable_face: bool = False,
                root_translation: bool = False, root_scale: float = 1.0,
-               debug_hands: bool = False):
+               debug_hands: bool = False,
+               foot_lock: bool = False, foot_lock_speed: float = 0.02,
+               ground_mode: str = "PLANE_Z", ground_z: float = 0.0,
+               ground_object=None, sole_offset: float = 0.0,
+               foot_lock_sensitivity: float = 1.0,
+               sample_time: float | None = None,
+               foot_lock_mode: str = "AUTO"):
     """Aplica una pose dispatcheando a los módulos habilitados.
 
     Parámetros principales:
@@ -146,7 +154,26 @@ def apply_pose(landmarks=None, *, hands_data=None, face_data=None,
             landmarks = calibrate_pose_landmarks(landmarks, R)
         hands_data = _calibrate_hands_payload(hands_data, R)
 
-    set_tick(time.time(), rotation_smooth)
+    tick_t = sample_time if sample_time is not None else time.time()
+    set_tick(tick_t, rotation_smooth)
+
+    common._state["forearm_oriented"] = set()
+    common._state["arm_chain_oriented"] = set()
+    skip_arms = set()
+    if enable_hands and hands_data and landmarks and len(landmarks) >= 17:
+        for bone_side in ("Left", "Right"):
+            data_key = "R" if swap_hands else ("L" if bone_side == "Left" else "R")
+            if swap_hands and bone_side == "Right":
+                data_key = "L"
+            side_data = hands_data.get(data_key)
+            lms = hands._hand_landmarks(side_data)
+            if lms and len(lms) >= 21:
+                elbow_idx, wrist_idx = hands._BODY_ELBOW_WRIST[bone_side]
+                sh_idx = 11 if bone_side == "Left" else 12
+                if (common.lm_visibility(landmarks[sh_idx]) >= min_visibility and
+                        common.lm_visibility(landmarks[elbow_idx]) >= min_visibility and
+                        common.lm_visibility(landmarks[wrist_idx]) >= min_visibility):
+                    skip_arms.add(bone_side)
     common._state["debug_hands"] = debug_hands
 
     moved = {"body": 0, "hands": 0, "face": 0}
@@ -156,7 +183,18 @@ def apply_pose(landmarks=None, *, hands_data=None, face_data=None,
             moved["body"] = body.apply(arm, landmarks, prefix=prefix,
                                        min_vis=min_visibility,
                                        root_translation=root_translation,
-                                       root_scale=root_scale)
+                                       root_scale=root_scale,
+                                       foot_lock=foot_lock,
+                                       foot_lock_speed=foot_lock_speed,
+                                       ground_mode=ground_mode,
+                                       ground_z=ground_z,
+                                       ground_object=ground_object,
+                                       sole_offset=sole_offset,
+                                       foot_lock_sensitivity=foot_lock_sensitivity,
+                                       sample_time=tick_t,
+                                       skip_forearms=skip_arms,
+                                       skip_arms=skip_arms,
+                                       foot_lock_mode=foot_lock_mode)
         except Exception:
             log.exception("module=body apply failed")
 
@@ -164,9 +202,20 @@ def apply_pose(landmarks=None, *, hands_data=None, face_data=None,
         try:
             moved["hands"] = hands.apply(arm, hands_data, landmarks=landmarks,
                                          prefix=prefix,
-                                         swap=swap_hands, flip_normal=flip_palm_normal)
+                                         swap=swap_hands, flip_normal=flip_palm_normal,
+                                         min_vis=min_visibility)
         except Exception:
             log.exception(f"module=hands apply failed; payload keys={list(hands_data.keys())}")
+
+    # Fallback de brazos: si body cedió el control a manos (skip_arms),
+    # pero manos no pudo orientar la cadena coordinada, body aplica orientación FK
+    # de rescate para que ni UpperArm ni ForeArm queden congelados.
+    if enable_body and landmarks and skip_arms:
+        for side in skip_arms:
+            if not hands.was_arm_chain_oriented(side) and not hands.was_forearm_oriented(side):
+                if body.orient_arm_fallback(arm, landmarks, prefix=prefix,
+                                            side=side, min_vis=min_visibility):
+                    moved["body"] += 2
 
     if enable_face and face_data:
         try:
