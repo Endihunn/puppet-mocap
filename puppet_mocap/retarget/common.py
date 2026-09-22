@@ -128,22 +128,53 @@ def fix_orientation(force: bool = False, prefix: str = "mixamorig:") -> bool:
     return True
 
 
+def is_own_take(action, arm) -> bool:
+    """True si `action` es una toma de Puppet Mocap para este armature
+    (marcador puppet_mocap_take/owner puesto al hornear en operators._bake_channels).
+    Una action que el usuario asignó a mano (Action Editor/NLA) nunca lo es."""
+    return bool(action.get("puppet_mocap_take")) and action.get("puppet_mocap_owner") == arm.name
+
+
+def remove_take_if_safe(action) -> None:
+    """Suelta nuestra referencia (fake_user) y borra el datablock SOLO si
+    queda en 0 usuarios reales. Si otro objeto/rig sigue apuntando a la misma
+    action (comparte datos), se conserva — nunca se fuerza `do_unlink=True`."""
+    action.use_fake_user = False
+    if action.users == 0:
+        bpy.data.actions.remove(action)
+    else:
+        log.info(
+            f"clear_all_keyframes: '{action.name}' sigue en uso "
+            f"(users={action.users}) — se conserva, no se fuerza el borrado."
+        )
+
+
 def clear_all_keyframes() -> bool:
-    """Borra la action del armature objetivo Y su animación facial (shape keys).
-    Las tomas horneadas de OTROS rigs del archivo se conservan (T3: marcador
-    por dueño)."""
+    """Elimina la toma de Puppet Mocap del armature objetivo (cuerpo + cara).
+    Solo toca actions marcadas como propias (T-borrado-seguro): una action
+    ajena que el usuario haya dejado activa a mano nunca se borra, y una
+    action propia que siga compartida con otro objeto se conserva en vez de
+    forzarse. Las tomas de OTROS rigs del archivo se conservan (T3)."""
     arm = get_armature()
     if arm is None:
         return False
-    if arm.animation_data and arm.animation_data.action:
-        bpy.data.actions.remove(arm.animation_data.action, do_unlink=True)
+    ad = arm.animation_data
+    if ad and ad.action:
+        if is_own_take(ad.action, arm):
+            action = ad.action
+            ad.action = None
+            remove_take_if_safe(action)
+        else:
+            log.info(
+                f"clear_all_keyframes: action activa '{ad.action.name}' no es "
+                "de Puppet Mocap (sin marcador propio) — se conserva."
+            )
     # Las tomas horneadas quedan desasignadas del slot en vivo (P0-1) pero
     # conservadas con fake_user + marcador; purgar SOLO las del armature
     # objetivo, no las de otros rigs del archivo (T3).
     for action in list(bpy.data.actions):
-        if (action.get("puppet_mocap_take")
-                and action.get("puppet_mocap_owner") == arm.name):
-            bpy.data.actions.remove(action, do_unlink=True)
+        if is_own_take(action, arm):
+            remove_take_if_safe(action)
     # Animación de shape keys vive en un datablock aparte (Key) — sin esto,
     # la actuación facial vieja sobrevivía a "Borrar Keyframes".
     from . import face as _face

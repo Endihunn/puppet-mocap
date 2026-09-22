@@ -1234,15 +1234,19 @@ class PUPPET_OT_toggle_record(bpy.types.Operator):
 
 class PUPPET_OT_clear_keyframes(bpy.types.Operator):
     bl_idname = "puppet_mocap.clear_keyframes"
-    bl_label = "Borrar Keyframes"
-    bl_description = "Elimina la action del armature Y la animación facial (shape keys)"
+    bl_label = "Eliminar esta toma"
+    bl_description = (
+        "Elimina la toma de Puppet Mocap del armature objetivo (cuerpo + cara). "
+        "Solo borra actions marcadas como propias; una animación ajena que hayas "
+        "asignado a mano se conserva"
+    )
     bl_options = {"REGISTER", "UNDO"}
 
     def execute(self, context):
         _sync_target(context.scene.puppet_mocap)
         if retarget.clear_all_keyframes():
-            log.info("keyframes borrados (cuerpo + cara)")
-            self.report({"INFO"}, "Keyframes borrados")
+            log.info("toma eliminada (cuerpo + cara)")
+            self.report({"INFO"}, "Toma eliminada")
             return {"FINISHED"}
         log.warn("clear_keyframes: sin armature")
         self.report({"ERROR"}, "No hay armature en la escena")

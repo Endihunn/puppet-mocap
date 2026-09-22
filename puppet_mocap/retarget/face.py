@@ -12,7 +12,7 @@ import time
 import bpy
 
 from .. import log
-from .common import _state, smooth_scalar
+from .common import _state, is_own_take, remove_take_if_safe, smooth_scalar
 
 # Nombres ARKit de los 52 blendshapes (se incluye '_neutral' aunque no lo usamos)
 ARKIT_SHAPES = (
@@ -210,11 +210,22 @@ def zero_values(arm):
 
 
 def clear_face_animation(arm):
-    """Borra la action de shape keys y regresa los valores ARKit a 0."""
+    """Borra la action de shape keys (SOLO si es una toma propia de Puppet
+    Mocap) y regresa los valores ARKit a 0. Una animación facial que el
+    usuario haya asignado a mano se conserva, igual que en clear_all_keyframes."""
     mesh = get_cached_mesh(arm)
     if mesh is None:
         return
     sks = mesh.data.shape_keys
-    if sks.animation_data and sks.animation_data.action:
-        bpy.data.actions.remove(sks.animation_data.action, do_unlink=True)
+    ad = sks.animation_data if sks else None
+    if ad and ad.action:
+        if is_own_take(ad.action, arm):
+            action = ad.action
+            ad.action = None
+            remove_take_if_safe(action)
+        else:
+            log.info(
+                f"clear_face_animation: action activa '{ad.action.name}' no "
+                "es de Puppet Mocap — se conserva."
+            )
     zero_values(arm)
