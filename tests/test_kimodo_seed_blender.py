@@ -43,13 +43,16 @@ def test_seed_flag_sent_when_toggle_on():
     assert cmd[cmd.index("--seed") + 1] == "42"
 
 
-def test_postprocess_flag_follows_its_own_bool_independently():
+def test_postprocess_flag_never_sent_even_if_persisted_true():
+    """P2: el panel fuerza este control a enabled=False (sin backend probado
+    de motion_correction); un valor True guardado de una versión anterior no
+    debe seguir mandando --postprocess en silencio."""
     cmd_off = operators.build_kimodo_cmd(_fake_props(False, -1, postprocess=False),
                                           "py", "runner.py", "stem")
     cmd_on = operators.build_kimodo_cmd(_fake_props(False, -1, postprocess=True),
                                          "py", "runner.py", "stem")
     assert "--postprocess" not in cmd_off
-    assert "--postprocess" in cmd_on
+    assert "--postprocess" not in cmd_on
 
 
 def test_enabling_seed_use_autofills_a_valid_seed():

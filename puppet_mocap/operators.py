@@ -1754,8 +1754,14 @@ def build_kimodo_cmd(props, py: str, runner: str, stem: str) -> list[str]:
            "--num_transition_frames", str(props.kimodo_num_transition)]
     if props.kimodo_seed_use:
         cmd += ["--seed", str(props.kimodo_seed)]
+    # P2: el panel fuerza este control a enabled=False (requiere el paquete
+    # C++ 'motion_correction' compilado, sin forma de probarlo desde aquí) —
+    # pero la propiedad persistida en el .blend seguía leyéndose tal cual,
+    # así que un valor True guardado de una sesión/versión anterior seguía
+    # mandando --postprocess en silencio y la generación fallaba al final.
+    # Mientras no haya un check real de capacidad, no se envía nunca.
     if props.kimodo_postprocess:
-        cmd += ["--postprocess"]
+        log.warn("kimodo_postprocess=True guardado pero ignorado (sin backend probado)")
     return cmd
 
 
