@@ -1596,6 +1596,23 @@ class PUPPET_OT_clear_log(bpy.types.Operator):
         return {"FINISHED"}
 
 
+def build_kimodo_cmd(props, py: str, runner: str, stem: str) -> list[str]:
+    """Construye el comando de kimodo_runner a partir de las props actuales.
+    Extraído de generate_motion() para poder probar el gate de --seed sin
+    lanzar el subprocess real (P1: 'Resultado repetible' debe cambiar el
+    comando efectivo, no solo mostrar/ocultar el campo)."""
+    cmd = [py, runner, "--prompt", props.kimodo_prompt,
+           "--duration", str(props.kimodo_duration),
+           "--model", props.kimodo_model,
+           "--out", stem,
+           "--num_transition_frames", str(props.kimodo_num_transition)]
+    if props.kimodo_seed_use:
+        cmd += ["--seed", str(props.kimodo_seed)]
+    if props.kimodo_postprocess:
+        cmd += ["--postprocess"]
+    return cmd
+
+
 class PUPPET_OT_generate_motion(bpy.types.Operator):
     bl_idname = "puppet_mocap.generate_motion"
     bl_label = "Generar movimiento"
@@ -1627,15 +1644,7 @@ class PUPPET_OT_generate_motion(bpy.types.Operator):
         out_dir = Path(tempfile.gettempdir()) / "puppet_mocap_kimodo"
         out_dir.mkdir(parents=True, exist_ok=True)
         stem = str(out_dir / f"take_{int(time.time())}")
-        cmd = [py, str(runner), "--prompt", props.kimodo_prompt,
-               "--duration", str(props.kimodo_duration),
-               "--model", props.kimodo_model,
-               "--out", stem,
-               "--num_transition_frames", str(props.kimodo_num_transition)]
-        if props.kimodo_seed >= 0:
-            cmd += ["--seed", str(props.kimodo_seed)]
-        if props.kimodo_postprocess:
-            cmd += ["--postprocess"]
+        cmd = build_kimodo_cmd(props, py, str(runner), stem)
         _kill_kimodo_proc()
         try:
             log_fh = open(log.get_kimodo_log_path(), "ab")

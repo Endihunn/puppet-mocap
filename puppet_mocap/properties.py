@@ -30,6 +30,15 @@ def _kimodo_example_update(self, context):
     self.kimodo_prompt = self.kimodo_example
 
 
+def _kimodo_seed_use_update(self, context):
+    """Al activar 'Resultado repetible' con semilla todavía en -1 (aleatoria),
+    fija una semilla concreta para que el toggle tenga efecto inmediato — antes
+    el comando decidía solo por kimodo_seed >= 0 e ignoraba este booleano."""
+    if self.kimodo_seed_use and self.kimodo_seed < 0:
+        import random
+        self.kimodo_seed = random.randint(0, 2**31 - 1)
+
+
 class PuppetMocapProperties(bpy.types.PropertyGroup):
     # Estado runtime (no se persiste a través de file save porque OPTIONS={'SKIP_SAVE'})
     server_running: bpy.props.BoolProperty(
@@ -412,6 +421,7 @@ class PuppetMocapProperties(bpy.types.PropertyGroup):
         name="Resultado repetible",
         description="Reutiliza la misma semilla para reproducir exactamente el mismo resultado",
         default=False,
+        update=_kimodo_seed_use_update,
     )
     kimodo_foot_lock: bpy.props.BoolProperty(
         name="Clavar pie de apoyo",
