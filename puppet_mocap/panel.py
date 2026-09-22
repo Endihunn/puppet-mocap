@@ -134,6 +134,10 @@ class PUPPET_PT_main(bpy.types.Panel):
         if props.enable_body:
             sub = box.column(align=True)
             sub.label(text="Pose + spine con twist + pies")
+            # P1 (hallazgo #5): foot_lock está activo por default y afecta el
+            # retarget en vivo, pero antes no tenía ningún control en el
+            # panel — el usuario no podía verlo ni apagarlo sin la consola.
+            sub.prop(props, "foot_lock", text="Estabilizar pies")
             sub.prop(props, "enable_root_translation")
             if props.enable_root_translation:
                 sub.prop(props, "root_translation_scale")
@@ -227,7 +231,11 @@ class PUPPET_PT_main(bpy.types.Panel):
                 label = f"● REC  f={props.last_record_frame}"
             row.operator("puppet_mocap.toggle_record", text=label, icon="PAUSE")
         else:
+            can_rec, rec_reason = ops_mod.can_start_recording(props)
+            row.enabled = can_rec
             row.operator("puppet_mocap.toggle_record", text="Grabar", icon="REC")
+            if not can_rec:
+                box.label(text=rec_reason, icon="ERROR")
         col = box.column(align=True)
         col.prop(props, "rec_countdown")
         col.prop(props, "use_scene_fps")

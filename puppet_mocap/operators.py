@@ -1213,8 +1213,9 @@ class PUPPET_OT_toggle_record(bpy.types.Operator):
                 self.report({"INFO"}, "Grabación cancelada (sin datos)")
             return {"FINISHED"}
 
-        if not server.is_running():
-            self.report({"ERROR"}, "Inicia la captura antes de grabar")
+        ok, msg = can_start_recording(props)
+        if not ok:
+            self.report({"ERROR"}, msg)
             return {"CANCELLED"}
 
         if props.use_scene_fps:
@@ -1606,6 +1607,23 @@ class PUPPET_OT_clear_log(bpy.types.Operator):
         log.info("log limpiado por el usuario")
         self.report({"INFO"}, "Log limpiado")
         return {"FINISHED"}
+
+
+def can_start_recording(props) -> tuple[bool, str]:
+    """Elegibilidad compartida entre panel y operador para 'Grabar' (P1,
+    hallazgo #6): antes el botón se dibujaba siempre disponible y
+    toggle_record() solo exigía server.is_running(), sin cliente conectado
+    ni ningún canal grabable activo — se podía "grabar" sin cámara (0
+    muestras) o con cuerpo/manos/cara apagados. Devuelve (ok, motivo)."""
+    if not server.is_running():
+        return False, "Inicia la captura antes de grabar"
+    if not server.is_client_connected():
+        return False, "Sin cliente conectado — espera a que la cámara se conecte"
+    if not ((props.enable_body and props.record_body)
+            or (props.enable_hands and props.record_hands)
+            or (props.enable_face and props.record_face)):
+        return False, "Activa al menos un canal grabable (cuerpo, manos o cara)"
+    return True, ""
 
 
 def build_kimodo_cmd(props, py: str, runner: str, stem: str) -> list[str]:
