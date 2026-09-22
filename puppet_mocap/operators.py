@@ -1078,6 +1078,15 @@ class PUPPET_OT_start_capture(bpy.types.Operator):
         if server.is_running():
             self.report({"WARNING"}, "El server ya está corriendo")
             return {"CANCELLED"}
+        if props.kimodo_running:
+            # Simétrico al gate de generate_motion: ambas rutas comparten el
+            # rig y _baked_state; no se prueba que sea seguro correr a la vez.
+            self.report(
+                {"ERROR"},
+                "Espera a que termine la generación de Kimodo antes de "
+                "iniciar la captura — ambas rutas comparten el rig",
+            )
+            return {"CANCELLED"}
 
         log.banner(f"START CAPTURE port={props.server_port} cam={props.cam_index}")
 
@@ -1794,7 +1803,19 @@ class PUPPET_OT_generate_motion(bpy.types.Operator):
         if props.kimodo_running:
             self.report({"WARNING"}, "Ya hay una generación de Kimodo en curso")
             return {"CANCELLED"}
-        # Independiente del estado de captura: NO consulta server.is_running().
+        if server.is_running():
+            # _kimodo_bake() reasigna arm.animation_data.action del MISMO rig
+            # (para que Blender evalúe el FK durante el postproceso de pies)
+            # y comparte _baked_state["body"] con las tomas de webcam. No hay
+            # nada que pruebe que eso es seguro con una captura en vivo
+            # escribiendo/horneando al mismo tiempo -- en vez de prometer
+            # independencia sin probarla, se bloquea con explicación.
+            self.report(
+                {"ERROR"},
+                "Detén la captura en vivo antes de generar por texto — ambas "
+                "rutas comparten el rig y el estado de la última toma",
+            )
+            return {"CANCELLED"}
         _sync_target(props)
         ok, msg = _validate_rig(props, include_body=True, include_hands=True)
         if not ok:
