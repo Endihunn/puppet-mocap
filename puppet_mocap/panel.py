@@ -160,7 +160,9 @@ class PUPPET_PT_main(bpy.types.Panel):
             sub = box.column(align=True)
             if not fs["face_model"]:
                 sub.label(text="face_landmarker.task no descargado", icon="ERROR")
-                sub.operator("puppet_mocap.download_models", icon="IMPORT")
+                row = sub.row(align=True)
+                row.enabled = not props.models_downloading
+                row.operator("puppet_mocap.download_models", icon="IMPORT")
             else:
                 # usa el cache del retarget en vez de re-escanear la escena;
                 # una sola llamada reutilizando el objeto (P1-1)
@@ -270,7 +272,9 @@ class PUPPET_PT_main(bpy.types.Panel):
         box = layout.box()
         box.label(text="Diagnóstico", icon="CONSOLE")
         col = box.column(align=True)
-        col.operator("puppet_mocap.check_deps", icon="CHECKMARK")
+        row = col.row(align=True)
+        row.enabled = not props.deps_checking
+        row.operator("puppet_mocap.check_deps", icon="CHECKMARK")
         missing_models = []
         if not fs["pose_model"]:
             missing_models.append("pose")
@@ -280,10 +284,15 @@ class PUPPET_PT_main(bpy.types.Panel):
             missing_models.append("cara")
         if missing_models:
             col.label(text=f"Modelos faltantes: {', '.join(missing_models)}", icon="ERROR")
-            col.operator("puppet_mocap.download_models", icon="IMPORT")
+            row = col.row(align=True)
+            row.enabled = not props.models_downloading
+            row.operator("puppet_mocap.download_models", icon="IMPORT")
         if props.deps_status:
-            icon = "CHECKMARK" if props.deps_status.startswith("OK") else "ERROR"
+            icon = "TIME" if props.deps_checking else (
+                "CHECKMARK" if props.deps_status.startswith("OK") else "ERROR")
             col.label(text=props.deps_status, icon=icon)
+        if props.models_download_status:
+            col.label(text=props.models_download_status, icon="IMPORT")
         if fs["log_kb"] is not None:
             col.label(text=f"Log: {fs['log_kb']:.1f} KB")
         else:
@@ -345,7 +354,11 @@ class PUPPET_PT_main(bpy.types.Panel):
                         else:
                             rr = col.row(align=True)
                             rr.label(text="✗ Python de Kimodo", icon="ERROR")
-                            rr.operator("puppet_mocap.autodetect_kimodo_python", text="Detectar")
+                            sub_btn = rr.row(align=True)
+                            sub_btn.enabled = not props.kimodo_python_checking
+                            sub_btn.operator("puppet_mocap.autodetect_kimodo_python", text="Detectar")
+                        if props.kimodo_python_checking:
+                            col.label(text="Buscando Python de Kimodo…", icon="TIME")
                         col.prop(props, "kimodo_python_path", text="")
                     if ch["python_ok"] and not ch["rig_ok"]:
                         col.label(text="✗ Rig no encontrado. Importa un FBX de Mixamo.",
@@ -398,7 +411,11 @@ class PUPPET_PT_main(bpy.types.Panel):
                         col.operator("puppet_mocap.open_kimodo_license",
                                      text="Cómo obtener acceso al modelo")
                     elif last_rc == 1:
-                        col.operator("puppet_mocap.check_kimodo_deps", text="Comprobar Kimodo")
+                        row = col.row(align=True)
+                        row.enabled = not props.kimodo_deps_checking
+                        row.operator("puppet_mocap.check_kimodo_deps",
+                                     text="Verificando…" if props.kimodo_deps_checking
+                                     else "Comprobar Kimodo")
                     elif last_rc == 2:
                         col.operator("puppet_mocap.open_kimodo_log", text="Ver detalles")
 

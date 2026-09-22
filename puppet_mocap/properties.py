@@ -84,6 +84,21 @@ class PuppetMocapProperties(bpy.types.PropertyGroup):
         default="",
         options={"SKIP_SAVE"},
     )
+    deps_checking: bpy.props.BoolProperty(
+        name="Verificando dependencias",
+        default=False,
+        options={"SKIP_SAVE"},
+    )
+    models_downloading: bpy.props.BoolProperty(
+        name="Descargando modelos",
+        default=False,
+        options={"SKIP_SAVE"},
+    )
+    models_download_status: bpy.props.StringProperty(
+        name="Estado de descarga",
+        default="",
+        options={"SKIP_SAVE"},
+    )
     bones_matched: bpy.props.IntProperty(
         name="Huesos coincidentes",
         default=-1,  # -1 = sin validar
@@ -461,6 +476,16 @@ class PuppetMocapProperties(bpy.types.PropertyGroup):
     kimodo_status: bpy.props.StringProperty(
         name="Kimodo status",
         default="",
+        options={"SKIP_SAVE"},
+    )
+    kimodo_deps_checking: bpy.props.BoolProperty(
+        name="Verificando deps de Kimodo",
+        default=False,
+        options={"SKIP_SAVE"},
+    )
+    kimodo_python_checking: bpy.props.BoolProperty(
+        name="Buscando Python de Kimodo",
+        default=False,
         options={"SKIP_SAVE"},
     )
     kimodo_show: bpy.props.BoolProperty(

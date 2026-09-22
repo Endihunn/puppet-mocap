@@ -7,6 +7,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.request
 from pathlib import Path
@@ -49,6 +50,41 @@ _ui_pulse_state = {"last": 0.0, "pending_frames": 0, "pending_last_frame": None}
 
 # Recolección de calibración de postura (el drain junta ~1.5 s de landmarks)
 _calib_state = {"collecting": False, "until": 0.0, "buf": []}
+
+
+def run_async(work_fn, on_done, poll_interval: float = 0.2):
+    """Corre `work_fn()` (bloqueante: subprocess.run, urllib) en un hilo
+    aparte y llama `on_done(result, error)` desde bpy.app.timers en el hilo
+    principal cuando termina. execute() puede devolver {'FINISHED'} de
+    inmediato: Blender no se congela mientras corre.
+
+    P1: check_deps, check_kimodo_deps, autodetect_kimodo_python y
+    download_models bloqueaban el hilo principal con subprocess.run(timeout=30/60)
+    o urllib.request.urlopen(timeout=20) directamente en execute() — pulsar el
+    botón dejaba Blender sin responder hasta 30-60s (o ~60s x 3 modelos).
+
+    `work_fn` NUNCA debe tocar bpy.data/bpy.context (corre en otro hilo, no es
+    thread-safe); `on_done` sí puede, porque corre dentro del timer. Devuelve
+    la función de poll (uso normal: ignorarla: Blender ya la registró)."""
+    box = {"done": False, "result": None, "error": None}
+
+    def _target():
+        try:
+            box["result"] = work_fn()
+        except Exception as e:  # reportar cualquier falla al poll, no perderla
+            box["error"] = e
+        box["done"] = True
+
+    threading.Thread(target=_target, daemon=True).start()
+
+    def _poll():
+        if not box["done"]:
+            return poll_interval
+        on_done(box["result"], box["error"])
+        return None
+
+    bpy.app.timers.register(_poll, first_interval=poll_interval)
+    return _poll  # expuesto para tests -- simular el pump de Blender a mano
 
 
 def _addon_dir() -> Path:
@@ -493,7 +529,12 @@ def _autodetect_kimodo_python(props) -> str:
 
 def _maybe_autodetect_kimodo(props):
     """Autodetecta UNA vez por sesión la primera vez que la caja se despliega
-    con la ruta vacía (cache negativo con TTL; nada de escanear por redibujo)."""
+    con la ruta vacía (cache negativo con TTL; nada de escanear por redibujo).
+
+    P1 (hallazgo #4): el escaneo real (_autodetect_kimodo_python, que corre
+    subprocess.run(timeout=60) por candidato) va en un hilo de fondo vía
+    run_async — antes se llamaba directo desde Panel.draw() y podía bloquear
+    la UI hasta 60s si un candidato existía pero 'import kimodo' se colgaba."""
     if props.kimodo_python_path or _KIMODO_AUTODETECT["done"]:
         return
     now = time.monotonic()
@@ -501,10 +542,17 @@ def _maybe_autodetect_kimodo(props):
         return
     _KIMODO_AUTODETECT["t"] = now
     _KIMODO_AUTODETECT["done"] = True
-    found = _autodetect_kimodo_python(props)
-    if found:
-        props.kimodo_python_path = found
-        props.kimodo_status = "Python de Kimodo detectado automáticamente"
+
+    def _on_done(found, error):
+        if error is not None:
+            log.exception("autodetect_kimodo_python (auto)")
+            return
+        if found:
+            props.kimodo_python_path = found
+            props.kimodo_status = "Python de Kimodo detectado automáticamente"
+            _tag_redraw_ui()
+
+    run_async(lambda: _autodetect_kimodo_python(props), _on_done)
 
 
 def _kimodo_error_message(props, rc) -> str:
@@ -1494,6 +1542,25 @@ def _version_tuple(v: str) -> tuple:
     return tuple(int(n) for n in re.findall(r"\d+", v)[:3])
 
 
+def _deps_check_work(python_path: str) -> dict:
+    """Bloqueante (subprocess.run) — se ejecuta en un hilo de fondo vía
+    run_async, nunca en el hilo principal."""
+    cmd = [
+        python_path, "-c",
+        "import mediapipe, cv2, numpy; "
+        "print(mediapipe.__version__ + '|' + cv2.__version__ + '|' + numpy.__version__)",
+    ]
+    flags = 0x08000000 if sys.platform == "win32" else 0  # CREATE_NO_WINDOW
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True,
+                           timeout=30, creationflags=flags)
+        return {"kind": "ran", "returncode": r.returncode, "stdout": r.stdout, "stderr": r.stderr}
+    except FileNotFoundError:
+        return {"kind": "not_found"}
+    except subprocess.TimeoutExpired:
+        return {"kind": "timeout"}
+
+
 class PUPPET_OT_check_deps(bpy.types.Operator):
     bl_idname = "puppet_mocap.check_deps"
     bl_label = "Verificar dependencias"
@@ -1501,44 +1568,54 @@ class PUPPET_OT_check_deps(bpy.types.Operator):
 
     def execute(self, context):
         props = context.scene.puppet_mocap
-        cmd = [
-            props.python_path, "-c",
-            "import mediapipe, cv2, numpy; "
-            "print(mediapipe.__version__ + '|' + cv2.__version__ + '|' + numpy.__version__)",
-        ]
-        flags = 0x08000000 if sys.platform == "win32" else 0  # CREATE_NO_WINDOW
-        try:
-            r = subprocess.run(cmd, capture_output=True, text=True,
-                               timeout=30, creationflags=flags)
-        except FileNotFoundError:
-            props.deps_status = f"Python no encontrado: {props.python_path}"
-            self.report({"ERROR"}, props.deps_status)
+        if props.deps_checking:
+            self.report({"WARNING"}, "Ya hay una verificación en curso")
             return {"CANCELLED"}
-        except subprocess.TimeoutExpired:
-            props.deps_status = "Timeout verificando (¿antivirus bloqueando?)"
-            self.report({"ERROR"}, props.deps_status)
-            return {"CANCELLED"}
-        if r.returncode == 0 and "|" in r.stdout:
-            mp_v, cv_v, np_v = r.stdout.strip().splitlines()[-1].split("|")
-            if _version_tuple(mp_v) < MIN_MEDIAPIPE:
-                props.deps_status = (
-                    f"mediapipe {mp_v} DEMASIADO viejo (mínimo "
-                    f"{'.'.join(map(str, MIN_MEDIAPIPE))}). Actualiza: "
-                    f"py -m pip install -U mediapipe"
-                )
+        python_path = props.python_path
+
+        def _on_done(result, error):
+            props.deps_checking = False
+            if error is not None or result is None:
+                log.exception("check_deps")
+                props.deps_status = f"Error verificando: {error}"
+                _tag_redraw_ui()
+                return
+            kind = result["kind"]
+            if kind == "not_found":
+                props.deps_status = f"Python no encontrado: {python_path}"
                 log.error(f"deps check: {props.deps_status}")
-                self.report({"ERROR"}, props.deps_status)
-                return {"CANCELLED"}
-            props.deps_status = f"OK — mediapipe {mp_v}, cv2 {cv_v}, numpy {np_v}"
-            log.info(f"deps: {props.deps_status}")
-            self.report({"INFO"}, props.deps_status)
-            return {"FINISHED"}
-        err_line = (r.stderr or "").strip().splitlines()
-        detail = err_line[-1] if err_line else f"código {r.returncode}"
-        props.deps_status = f"FALTAN dependencias: {detail}"
-        log.error(f"deps check: {detail}")
-        self.report({"ERROR"}, props.deps_status)
-        return {"CANCELLED"}
+                _tag_redraw_ui()
+                return
+            if kind == "timeout":
+                props.deps_status = "Timeout verificando (¿antivirus bloqueando?)"
+                log.error(f"deps check: {props.deps_status}")
+                _tag_redraw_ui()
+                return
+            rc, out, err = result["returncode"], result["stdout"], result["stderr"]
+            if rc == 0 and "|" in out:
+                mp_v, cv_v, np_v = out.strip().splitlines()[-1].split("|")
+                if _version_tuple(mp_v) < MIN_MEDIAPIPE:
+                    props.deps_status = (
+                        f"mediapipe {mp_v} DEMASIADO viejo (mínimo "
+                        f"{'.'.join(map(str, MIN_MEDIAPIPE))}). Actualiza: "
+                        f"py -m pip install -U mediapipe"
+                    )
+                    log.error(f"deps check: {props.deps_status}")
+                else:
+                    props.deps_status = f"OK — mediapipe {mp_v}, cv2 {cv_v}, numpy {np_v}"
+                    log.info(f"deps: {props.deps_status}")
+            else:
+                err_line = (err or "").strip().splitlines()
+                detail = err_line[-1] if err_line else f"código {rc}"
+                props.deps_status = f"FALTAN dependencias: {detail}"
+                log.error(f"deps check: {detail}")
+            _tag_redraw_ui()
+
+        props.deps_checking = True
+        props.deps_status = "Verificando…"
+        run_async(lambda: _deps_check_work(python_path), _on_done)
+        self.report({"INFO"}, "Verificando dependencias…")
+        return {"FINISHED"}
 
 
 class PUPPET_OT_open_log(bpy.types.Operator):
@@ -1569,27 +1646,66 @@ class PUPPET_OT_open_log(bpy.types.Operator):
         return {"FINISHED"}
 
 
+_MODELS_DOWNLOAD_PROGRESS = {"current": ""}
+
+
+def _download_models_work(missing: list) -> list:
+    """Bloqueante (red) — se ejecuta en un hilo de fondo vía run_async, nunca
+    en el hilo principal. `_MODELS_DOWNLOAD_PROGRESS` es un dict Python plano
+    (no bpy) que el timer de progreso puede leer sin problemas de threading."""
+    results = []
+    for filename in missing:
+        _MODELS_DOWNLOAD_PROGRESS["current"] = filename
+        log.info(f"descargando {filename} ...")
+        ok, msg = _download_model(filename)
+        if ok:
+            log.info(f"{filename} descargado ({msg})")
+        else:
+            log.error(f"{filename} falló: {msg}")
+        results.append((filename, ok, msg))
+    _MODELS_DOWNLOAD_PROGRESS["current"] = ""
+    return results
+
+
 class PUPPET_OT_download_models(bpy.types.Operator):
     bl_idname = "puppet_mocap.download_models"
     bl_label = "Descargar modelos"
     bl_description = "Descarga los modelos MediaPipe que falten (pose + manos + cara) a la carpeta models/ del addon"
 
     def execute(self, context):
+        props = context.scene.puppet_mocap
+        if props.models_downloading:
+            self.report({"WARNING"}, "Ya hay una descarga en curso")
+            return {"CANCELLED"}
         missing = [f for f in MODEL_URLS if not (_addon_dir() / "models" / f).exists()]
         if not missing:
             self.report({"INFO"}, "Todos los modelos ya están descargados")
             return {"CANCELLED"}
-        results = []
-        for filename in missing:
-            log.info(f"descargando {filename} ...")
-            ok, msg = _download_model(filename)
-            if ok:
-                log.info(f"{filename} descargado ({msg})")
-                results.append(f"{filename} ✓")
-            else:
-                log.error(f"{filename} falló: {msg}")
-                results.append(f"{filename} ✗ ({msg})")
-        self.report({"INFO"}, "Modelos: " + "; ".join(results))
+
+        def _progress_poll():
+            if not props.models_downloading:
+                return None
+            cur = _MODELS_DOWNLOAD_PROGRESS.get("current", "")
+            props.models_download_status = f"Descargando {cur}…" if cur else "Descargando…"
+            _tag_redraw_ui()
+            return 0.3
+
+        def _on_done(result, error):
+            props.models_downloading = False
+            if error is not None or result is None:
+                log.exception("download_models")
+                props.models_download_status = f"Error descargando: {error}"
+                _tag_redraw_ui()
+                return
+            parts = [f"{name} {'✓' if ok else f'✗ ({msg})'}" for name, ok, msg in result]
+            props.models_download_status = "Modelos: " + "; ".join(parts)
+            _tag_redraw_ui()
+
+        props.models_downloading = True
+        props.models_download_status = "Descargando…"
+        run_async(lambda: _download_models_work(missing), _on_done)
+        bpy.app.timers.register(_progress_poll, first_interval=0.3)
+        self.report({"INFO"}, f"Descargando {len(missing)} modelo(s)…")
         return {"FINISHED"}
 
 
@@ -1728,6 +1844,21 @@ class PUPPET_OT_cancel_generate(bpy.types.Operator):
         return {"FINISHED"}
 
 
+def _kimodo_deps_check_work(python_path: str) -> dict:
+    """Bloqueante (subprocess.run) — se ejecuta en un hilo de fondo vía
+    run_async, nunca en el hilo principal."""
+    cmd = [python_path, "-c", "import torch, transformers, kimodo; print(torch.__version__)"]
+    flags = 0x08000000 if sys.platform == "win32" else 0
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True,
+                           timeout=30, creationflags=flags)
+        return {"kind": "ran", "returncode": r.returncode, "stdout": r.stdout, "stderr": r.stderr}
+    except FileNotFoundError:
+        return {"kind": "not_found"}
+    except subprocess.TimeoutExpired:
+        return {"kind": "timeout"}
+
+
 class PUPPET_OT_check_kimodo_deps(bpy.types.Operator):
     bl_idname = "puppet_mocap.check_kimodo_deps"
     bl_label = "Verificar deps de Kimodo"
@@ -1740,29 +1871,43 @@ class PUPPET_OT_check_kimodo_deps(bpy.types.Operator):
             props.kimodo_status = "Configura el Python de Kimodo"
             self.report({"ERROR"}, props.kimodo_status)
             return {"CANCELLED"}
-        cmd = [py, "-c", "import torch, transformers, kimodo; print(torch.__version__)"]
-        flags = 0x08000000 if sys.platform == "win32" else 0
-        try:
-            r = subprocess.run(cmd, capture_output=True, text=True,
-                               timeout=30, creationflags=flags)
-        except FileNotFoundError:
-            props.kimodo_status = f"Python de Kimodo no encontrado: {py}"
-            self.report({"ERROR"}, props.kimodo_status)
+        if props.kimodo_deps_checking:
+            self.report({"WARNING"}, "Ya hay una verificación en curso")
             return {"CANCELLED"}
-        except subprocess.TimeoutExpired:
-            props.kimodo_status = "Timeout verificando (¿antivirus?)"
-            self.report({"ERROR"}, props.kimodo_status)
-            return {"CANCELLED"}
-        if r.returncode == 0:
-            props.kimodo_status = f"OK — torch {r.stdout.strip()}"
-            log.info(f"kimodo deps: {props.kimodo_status}")
-            self.report({"INFO"}, props.kimodo_status)
-            return {"FINISHED"}
-        detail = (r.stderr or "").strip().splitlines()
-        props.kimodo_status = "FALTAN deps de Kimodo: " + (detail[-1] if detail else f"rc {r.returncode}")
-        log.error(f"kimodo deps: {props.kimodo_status}")
-        self.report({"ERROR"}, props.kimodo_status)
-        return {"CANCELLED"}
+
+        def _on_done(result, error):
+            props.kimodo_deps_checking = False
+            if error is not None or result is None:
+                log.exception("check_kimodo_deps")
+                props.kimodo_status = f"Error verificando: {error}"
+                _tag_redraw_ui()
+                return
+            kind = result["kind"]
+            if kind == "not_found":
+                props.kimodo_status = f"Python de Kimodo no encontrado: {py}"
+                log.error(f"kimodo deps: {props.kimodo_status}")
+                _tag_redraw_ui()
+                return
+            if kind == "timeout":
+                props.kimodo_status = "Timeout verificando (¿antivirus?)"
+                log.error(f"kimodo deps: {props.kimodo_status}")
+                _tag_redraw_ui()
+                return
+            rc, out, err = result["returncode"], result["stdout"], result["stderr"]
+            if rc == 0:
+                props.kimodo_status = f"OK — torch {out.strip()}"
+                log.info(f"kimodo deps: {props.kimodo_status}")
+            else:
+                detail = (err or "").strip().splitlines()
+                props.kimodo_status = "FALTAN deps de Kimodo: " + (detail[-1] if detail else f"rc {rc}")
+                log.error(f"kimodo deps: {props.kimodo_status}")
+            _tag_redraw_ui()
+
+        props.kimodo_deps_checking = True
+        props.kimodo_status = "Verificando…"
+        run_async(lambda: _kimodo_deps_check_work(py), _on_done)
+        self.report({"INFO"}, "Verificando dependencias de Kimodo…")
+        return {"FINISHED"}
 
 
 class PUPPET_OT_autodetect_kimodo_python(bpy.types.Operator):
@@ -1772,14 +1917,27 @@ class PUPPET_OT_autodetect_kimodo_python(bpy.types.Operator):
 
     def execute(self, context):
         props = context.scene.puppet_mocap
-        found = _autodetect_kimodo_python(props)
-        if found:
-            props.kimodo_python_path = found
-            props.kimodo_status = "Python de Kimodo detectado"
-            self.report({"INFO"}, f"Detectado: {found}")
-        else:
-            props.kimodo_status = "No encontré el Python de Kimodo. Usa 'Elegir…'."
-            self.report({"WARNING"}, "No se encontró el Python de Kimodo")
+        if props.kimodo_python_checking:
+            self.report({"WARNING"}, "Ya hay una búsqueda en curso")
+            return {"CANCELLED"}
+
+        def _on_done(found, error):
+            props.kimodo_python_checking = False
+            if error is not None:
+                log.exception("autodetect_kimodo_python")
+                props.kimodo_status = f"Error buscando: {error}"
+            elif found:
+                props.kimodo_python_path = found
+                props.kimodo_status = "Python de Kimodo detectado"
+                log.info(f"kimodo python detectado: {found}")
+            else:
+                props.kimodo_status = "No encontré el Python de Kimodo. Usa 'Elegir…'."
+            _tag_redraw_ui()
+
+        props.kimodo_python_checking = True
+        props.kimodo_status = "Buscando…"
+        run_async(lambda: _autodetect_kimodo_python(props), _on_done)
+        self.report({"INFO"}, "Buscando Python de Kimodo…")
         return {"FINISHED"}
 
 
