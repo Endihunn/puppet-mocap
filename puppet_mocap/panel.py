@@ -61,15 +61,30 @@ def _kimodo_checklist(ops_mod, props):
     return data
 
 
-def _module_box(layout, props, title, icon, enable_attr, record_attr):
-    """Caja con header (toggle de habilitar) y switch de grabación."""
+def _module_box(layout, props, title, icon, enable_attr, record_attr, locked=False):
+    """Caja con header (toggle de habilitar) y switch de grabación.
+
+    `locked=True` (captura corriendo) grisa el toggle de habilitar: el
+    proceso externo decide qué modelos cargar AL LANZARSE según
+    enable_body/hands/face — cambiarlo a media captura no hace nada porque
+    ese proceso nunca recibió el modelo correspondiente (P1, "inmutabilidad
+    de selección de módulos"). record_body/hands/face sí se puede cambiar
+    en vivo: solo decide si el buffer de grabación incluye datos que YA
+    están llegando, no qué carga el proceso externo."""
     box = layout.box()
     row = box.row(align=True)
-    row.prop(props, enable_attr, text="")
+    enable_row = row.row(align=True)
+    enable_row.enabled = not locked
+    enable_row.prop(props, enable_attr, text="")
     row.label(text=title, icon=icon)
     sub = row.row(align=True)
     sub.active = getattr(props, enable_attr)
     sub.prop(props, record_attr, text="Grabar", toggle=True)
+    if locked:
+        box.label(
+            text="Fijo durante la captura — detén e inicia de nuevo para cambiarlo",
+            icon="LOCKED",
+        )
     return box
 
 
@@ -130,7 +145,7 @@ class PUPPET_PT_main(bpy.types.Panel):
 
         # --- Módulos: Cuerpo ---
         box = _module_box(layout, props, "Cuerpo", "ARMATURE_DATA",
-                          "enable_body", "record_body")
+                          "enable_body", "record_body", locked=running)
         if props.enable_body:
             sub = box.column(align=True)
             sub.label(text="Pose + spine con twist + pies")
@@ -144,7 +159,7 @@ class PUPPET_PT_main(bpy.types.Panel):
 
         # --- Módulos: Manos ---
         box = _module_box(layout, props, "Manos", "VIEW_PAN",
-                          "enable_hands", "record_hands")
+                          "enable_hands", "record_hands", locked=running)
         if props.enable_hands:
             sub = box.column(align=True)
             sub.prop(props, "swap_hands")
@@ -155,7 +170,7 @@ class PUPPET_PT_main(bpy.types.Panel):
 
         # --- Módulos: Cara ---
         box = _module_box(layout, props, "Cara", "USER",
-                          "enable_face", "record_face")
+                          "enable_face", "record_face", locked=running)
         if props.enable_face:
             sub = box.column(align=True)
             if not fs["face_model"]:
