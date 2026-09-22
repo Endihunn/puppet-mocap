@@ -1316,17 +1316,36 @@ class PUPPET_OT_clear_keyframes(bpy.types.Operator):
 
 class PUPPET_OT_reset_rig(bpy.types.Operator):
     bl_idname = "puppet_mocap.reset_rig"
-    bl_label = "Reset Rig"
-    bl_description = "Resetea el armature a rest pose y los shape keys a 0 (no borra actions)"
+    bl_label = "Reiniciar pose"
+    bl_description = (
+        "Resetea la POSE del armature a rest pose y los shape keys a 0 (no "
+        "borra actions, no toca la rotación/ubicación del objeto)"
+    )
     bl_options = {"REGISTER", "UNDO"}
+
+    reset_object_transform: bpy.props.BoolProperty(
+        name="También reiniciar transform del objeto",
+        description=(
+            "Pone a cero la rotación del OBJETO armature — borra cualquier "
+            "colocación deliberada (p.ej. el +90° X típico de un rig Mixamo). "
+            "Normalmente NO quieres esto; disponible en el panel de repetir "
+            "operación (F6) para el caso raro en que sí"
+        ),
+        default=False,
+    )
 
     def execute(self, context):
         props = context.scene.puppet_mocap
         _sync_target(props)
-        if retarget.fix_orientation(force=True, prefix=props.bone_prefix):
+        if retarget.fix_orientation(force=True, prefix=props.bone_prefix,
+                                     reset_object_transform=self.reset_object_transform):
             retarget.face.zero_values(retarget.get_armature())
-            log.info(f"rig reseteado prefix='{props.bone_prefix}'")
-            self.report({"INFO"}, "Rig reseteado a rest pose")
+            log.info(f"pose reseteada prefix='{props.bone_prefix}' "
+                     f"object_transform={self.reset_object_transform}")
+            msg = "Pose reseteada"
+            if self.reset_object_transform:
+                msg += " (+ transform del objeto)"
+            self.report({"INFO"}, msg)
             return {"FINISHED"}
         log.warn("reset_rig: sin armature")
         self.report({"ERROR"}, "No hay armature en la escena")

@@ -104,20 +104,29 @@ def get_armature():
     return _cache_arm(arm)
 
 
-def fix_orientation(force: bool = False, prefix: str = "mixamorig:") -> bool:
+def fix_orientation(force: bool = False, prefix: str = "mixamorig:",
+                     reset_object_transform: bool = False) -> bool:
     """Prepara el rig para capturar. NO borra actions y, con force=False
     (start normal), NUNCA pisa la pose del usuario: solo garantiza el
-    rotation_mode QUATERNION (vía _cache_arm). El reseteo completo (objeto +
-    pose bones a identidad) vive únicamente en el botón Reset Rig (force=True)."""
+    rotation_mode QUATERNION (vía _cache_arm). El reseteo de POSE (huesos a
+    identidad) vive en el botón Reset Rig (force=True).
+
+    `reset_object_transform=True` ADEMÁS pone a cero la rotación del OBJETO
+    armature — antes esto pasaba siempre con force=True, sin pedirlo, y
+    borraba cualquier colocación deliberada (p.ej. el +90° X típico de un rig
+    Mixamo). Por default se preserva la colocación del personaje (P2:
+    'preservación de la colocación del rig')."""
     arm = get_armature()
     if arm is None:
         return False
     reset_smoothing()
     if force:
-        log.info(f"reset armature '{arm.name}' prefix='{prefix}'")
-        arm.rotation_mode = "XYZ"
-        arm.rotation_euler = (0.0, 0.0, 0.0)
-        arm.rotation_quaternion = (1.0, 0.0, 0.0, 0.0)
+        log.info(f"reset pose de '{arm.name}' prefix='{prefix}' "
+                 f"object_transform={reset_object_transform}")
+        if reset_object_transform:
+            arm.rotation_mode = "XYZ"
+            arm.rotation_euler = (0.0, 0.0, 0.0)
+            arm.rotation_quaternion = (1.0, 0.0, 0.0, 0.0)
         for pb in arm.pose.bones:
             pb.rotation_mode = "QUATERNION"
             pb.rotation_quaternion = (1.0, 0.0, 0.0, 0.0)
