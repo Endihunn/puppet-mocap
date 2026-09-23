@@ -126,27 +126,47 @@ class PUPPET_PT_main(bpy.types.Panel):
         running = server.is_running()
         fs = _fs_state(ops_mod)
 
-        # --- Rig objetivo ---
+        # --- Personaje y cámara ---
         box = layout.box()
+        box.label(text="Personaje y cámara", icon="ARMATURE_DATA")
         col = box.column(align=True)
         row = col.row(align=True)
         row.enabled = not running
         row.prop(props, "target_armature", text="Rig")
-        row = col.row(align=True)
-        row.enabled = not running
-        row.prop(props, "bone_prefix", text="")
-        row.operator("puppet_mocap.detect_prefix", text="", icon="VIEWZOOM")
         if running:
             col.label(text="Detén la cámara para cambiar el rig", icon="INFO")
-        if props.bones_matched >= 0 and props.bones_total > 0:
-            if props.bones_matched == props.bones_total:
-                col.label(text=f"Huesos: {props.bones_matched}/{props.bones_total}",
-                          icon="CHECKMARK")
-            elif props.bones_matched == 0:
-                col.label(text="Prefijo no coincide con el rig", icon="ERROR")
-            else:
-                col.label(text=f"Huesos: {props.bones_matched}/{props.bones_total}",
-                          icon="QUESTION")
+
+        if props.target_armature is None:
+            col.label(text="Elige un personaje para continuar", icon="ERROR")
+        elif props.bones_matched < 0 or props.bones_total == 0:
+            col.label(text="Verificando compatibilidad…", icon="TIME")
+        elif props.bones_matched == props.bones_total:
+            col.label(text="Personaje compatible", icon="CHECKMARK")
+        elif props.bones_matched == 0:
+            col.label(text="Prefijo no coincide con el rig — revisa Avanzado", icon="ERROR")
+        else:
+            col.label(
+                text=f"Personaje parcialmente compatible ({props.bones_matched}/"
+                     f"{props.bones_total} huesos)",
+                icon="ERROR",
+            )
+
+        col.label(text=ops_mod.camera_display_label(props.cam_index), icon="CAMERA_DATA")
+
+        adv = box.column(align=True)
+        adv.prop(props, "personaje_advanced", text="Avanzado", toggle=True, icon="PREFERENCES")
+        if props.personaje_advanced:
+            row = adv.row(align=True)
+            row.enabled = not running
+            row.prop(props, "bone_prefix", text="")
+            row.operator("puppet_mocap.detect_prefix", text="", icon="VIEWZOOM")
+            if props.bones_matched >= 0 and props.bones_total > 0:
+                adv.label(text=f"Huesos: {props.bones_matched}/{props.bones_total}")
+            cam_row = adv.row(align=True)
+            cam_row.enabled = not running
+            cam_row.prop(props, "cam_index")
+            if running:
+                adv.label(text="Detén la cámara para cambiar el índice", icon="INFO")
 
         # --- Estado ---
         box = layout.box()
@@ -414,7 +434,8 @@ class PUPPET_PT_main(bpy.types.Panel):
                       icon="LOCKED")
         launch = box.column(align=True)
         launch.enabled = not running
-        launch.prop(props, "cam_index")
+        # cam_index vive en Personaje y cámara > Avanzado (junto al nombre
+        # detectado, donde tiene contexto); aquí solo los params de envío.
         launch.prop(props, "send_fps")
         launch.prop(props, "smooth_min_cutoff")
         launch.prop(props, "smooth_beta")

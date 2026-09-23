@@ -95,6 +95,73 @@ def run_async(work_fn, on_done, poll_interval: float = 0.2):
     return _poll  # expuesto para tests -- simular el pump de Blender a mano
 
 
+_CAMERA_NAMES = {"names": None, "checking": False, "t": 0.0}
+_CAMERA_NAMES_TTL = 30.0
+
+
+def _detect_cameras_work() -> list:
+    """Bloqueante (PowerShell/WMI) — se ejecuta en un hilo de fondo vía
+    run_async. cv2/DirectShow no dan el nombre real del dispositivo por
+    índice; Get-PnpDevice sí, pero su orden de enumeración no está
+    garantizado que coincida con el índice que usa OpenCV -- por eso NUNCA
+    se afirma una correspondencia exacta cuando hay más de una cámara (ver
+    camera_display_label)."""
+    if sys.platform != "win32":
+        return []
+    try:
+        flags = 0x08000000
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+             "Get-PnpDevice -PresentOnly -Class Camera | "
+             "Select-Object -ExpandProperty FriendlyName | ConvertTo-Json"],
+            capture_output=True, text=True, timeout=10, creationflags=flags,
+        )
+        if r.returncode != 0 or not r.stdout.strip():
+            return []
+        import json
+        data = json.loads(r.stdout)
+        if isinstance(data, str):
+            data = [data]
+        return [str(n) for n in data if n]
+    except Exception:
+        return []
+
+
+def _maybe_detect_cameras():
+    """Autodetecta nombres de cámara UNA vez por TTL, en segundo plano.
+    Seguro de llamar desde Panel.draw() -- nunca bloquea, nunca relanza
+    mientras ya hay una consulta en curso."""
+    now = time.monotonic()
+    if _CAMERA_NAMES["names"] is not None and now - _CAMERA_NAMES["t"] < _CAMERA_NAMES_TTL:
+        return
+    if _CAMERA_NAMES["checking"]:
+        return
+    _CAMERA_NAMES["checking"] = True
+
+    def _on_done(result, error):
+        _CAMERA_NAMES["checking"] = False
+        _CAMERA_NAMES["names"] = result if error is None and result is not None else []
+        _CAMERA_NAMES["t"] = time.monotonic()
+        _tag_redraw_ui()
+
+    run_async(_detect_cameras_work, _on_done)
+
+
+def camera_display_label(cam_index: int) -> str:
+    """Nombre real de la cámara si se detectó con confianza; si no, un
+    índice honesto (P1 Fase 3: 'no presentar un índice como un dispositivo
+    identificado' -- nunca se finge un nombre que no se pudo verificar)."""
+    names = _CAMERA_NAMES["names"]
+    if names is None:
+        _maybe_detect_cameras()
+        return f"Cámara #{cam_index} (detectando nombre…)"
+    if not names or not (0 <= cam_index < len(names)):
+        return f"Cámara #{cam_index} (nombre no detectado)"
+    if len(names) == 1:
+        return names[0]
+    return f"{names[cam_index]} (orden no garantizado — verifica en Ajustes avanzados)"
+
+
 def _addon_dir() -> Path:
     return Path(__file__).resolve().parent
 

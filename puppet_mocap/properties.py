@@ -374,6 +374,13 @@ class PuppetMocapProperties(bpy.types.PropertyGroup):
         description="Prefijo de los huesos del rig (ej: 'mixamorig:'). Si el rig no se mueve, verifica este nombre.",
         default="mixamorig:",
     )
+    personaje_advanced: bpy.props.BoolProperty(
+        name="Avanzado (personaje)",
+        description="Prefijo de huesos, detección manual, conteo exacto de huesos y "
+                     "el índice numérico de cámara (anulación manual del nombre detectado)",
+        default=False,
+        options={"SKIP_SAVE"},
+    )
     server_port: bpy.props.IntProperty(
         name="Puerto",
         description="Puerto TCP del addon",
