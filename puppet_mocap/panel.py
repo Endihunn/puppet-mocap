@@ -136,6 +136,8 @@ class PUPPET_PT_main(bpy.types.Panel):
         row.enabled = not running
         row.prop(props, "bone_prefix", text="")
         row.operator("puppet_mocap.detect_prefix", text="", icon="VIEWZOOM")
+        if running:
+            col.label(text="Detén la cámara para cambiar el rig", icon="INFO")
         if props.bones_matched >= 0 and props.bones_total > 0:
             if props.bones_matched == props.bones_total:
                 col.label(text=f"Huesos: {props.bones_matched}/{props.bones_total}",
@@ -202,6 +204,8 @@ class PUPPET_PT_main(bpy.types.Panel):
                 row = sub.row(align=True)
                 row.enabled = not props.models_downloading
                 row.operator("puppet_mocap.download_models", icon="IMPORT")
+                if props.models_downloading:
+                    sub.label(text=props.models_download_status or "Descargando…", icon="TIME")
             else:
                 # usa el cache del retarget en vez de re-escanear la escena;
                 # una sola llamada reutilizando el objeto (P1-1)
@@ -239,6 +243,10 @@ class PUPPET_PT_main(bpy.types.Panel):
         sub2 = row.row(align=True)
         sub2.enabled = props.calib_valid
         sub2.operator("puppet_mocap.clear_calibration", text="", icon="X")
+        if running and not connected:
+            col.label(text="Esperando a que la cámara se conecte", icon="INFO")
+        elif not running:
+            col.label(text="Inicia la vista previa para calibrar", icon="INFO")
 
         # --- Captura ---
         box = layout.box()
@@ -334,6 +342,8 @@ class PUPPET_PT_main(bpy.types.Panel):
             sub = row.row(align=True)
             sub.enabled = not running
             sub.operator("puppet_mocap.new_take", text="Nueva toma", icon="ADD")
+            if running:
+                box.label(text="Detén la cámara para reproducir una toma", icon="INFO")
 
             opt = box.column(align=True)
             opt.label(text="Opciones de la toma:")
@@ -342,8 +352,11 @@ class PUPPET_PT_main(bpy.types.Panel):
             corr_row = opt.row(align=True)
             corr_row.enabled = (not running) and (not props.is_recording) and bool(take["body_action"])
             corr_row.operator("puppet_mocap.lock_current_take", text="Corregir pies", icon="MOD_DYNAMICPAINT")
-            if not corr_row.enabled and running:
-                opt.label(text="Detén la cámara para corregir pies", icon="ERROR")
+            if not corr_row.enabled:
+                if running or props.is_recording:
+                    opt.label(text="Detén la captura para corregir pies", icon="ERROR")
+                elif not take["body_action"]:
+                    opt.label(text="Esta toma no tiene canal de cuerpo", icon="ERROR")
             del_row = opt.row(align=True)
             del_row.operator("puppet_mocap.clear_keyframes", text="Eliminar esta toma", icon="TRASH")
 
@@ -396,6 +409,9 @@ class PUPPET_PT_main(bpy.types.Panel):
         col.separator()
         # Estos solo se leen al INICIAR captura — editarlos a media sesión no
         # hace nada, así que se bloquean para no confundir
+        if running:
+            box.label(text="Fijo durante la captura — detén e inicia de nuevo para cambiarlo",
+                      icon="LOCKED")
         launch = box.column(align=True)
         launch.enabled = not running
         launch.prop(props, "cam_index")
