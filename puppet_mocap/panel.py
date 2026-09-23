@@ -88,6 +88,30 @@ def _module_box(layout, props, title, icon, enable_attr, record_attr, locked=Fal
     return box
 
 
+class PUPPET_MT_take_list(bpy.types.Menu):
+    bl_idname = "PUPPET_MT_take_list"
+    bl_label = "Tomas"
+
+    def draw(self, context):
+        from . import operators as ops_mod
+        layout = self.layout
+        props = context.scene.puppet_mocap
+        arm = ops_mod.retarget.get_armature()
+        if arm is None:
+            layout.label(text="Sin armature", icon="ERROR")
+            return
+        takes = ops_mod.list_takes(arm.name)
+        if not takes:
+            layout.label(text="No hay tomas todavía")
+            return
+        for take in takes:
+            label = take["label"]
+            if take["take_id"] == props.selected_take_id:
+                label = f"● {label}"
+            op = layout.operator("puppet_mocap.select_take", text=label)
+            op.take_id = take["take_id"]
+
+
 class PUPPET_PT_main(bpy.types.Panel):
     bl_label = "Puppet Mocap"
     bl_idname = "PUPPET_PT_main"
@@ -220,9 +244,11 @@ class PUPPET_PT_main(bpy.types.Panel):
         box = layout.box()
         box.label(text="Captura", icon="OUTLINER_OB_CAMERA")
         if running:
-            box.operator("puppet_mocap.stop_capture", icon="PAUSE")
+            if props.is_recording:
+                box.label(text="Esto también finalizará la grabación en curso", icon="INFO")
+            box.operator("puppet_mocap.stop_capture", text="Detener cámara", icon="PAUSE")
         else:
-            box.operator("puppet_mocap.start_capture", icon="PLAY")
+            box.operator("puppet_mocap.start_capture", text="Iniciar vista previa", icon="PLAY")
 
         # --- Grabación ---
         box = layout.box()
@@ -243,10 +269,11 @@ class PUPPET_PT_main(bpy.types.Panel):
             row.alert = True
             if st["pending"]:
                 remaining = max(0.0, st["t_pending_end"] - time.time())
-                label = f"● REC en {remaining:.0f}s..."
+                row.operator("puppet_mocap.toggle_record",
+                             text=f"Cancelar cuenta regresiva ({remaining:.0f} s)", icon="X")
             else:
-                label = f"● REC  f={props.last_record_frame}"
-            row.operator("puppet_mocap.toggle_record", text=label, icon="PAUSE")
+                label = f"Finalizar toma — f={props.last_record_frame}"
+                row.operator("puppet_mocap.toggle_record", text=label, icon="PAUSE")
         else:
             can_rec, rec_reason = ops_mod.can_start_recording(props)
             row.enabled = can_rec
@@ -270,13 +297,55 @@ class PUPPET_PT_main(bpy.types.Panel):
                      f"({eff_fps:.1f}): se descartarán muestras",
                 icon="ERROR",
             )
-        row = box.row(align=True)
-        row.enabled = (not running) and (
-            ops_mod._baked_state.get("body") is not None
-            or ops_mod._baked_state.get("face") is not None
-        )
-        row.prop(props, "play_take", text="Reproducir toma", toggle=True)
-        box.operator("puppet_mocap.clear_keyframes", icon="TRASH")
+        # --- Última toma ---
+        box = layout.box()
+        box.label(text="Última toma", icon="ANIM_DATA")
+        arm = ops_mod.retarget.get_armature()
+        takes = ops_mod.list_takes(arm.name) if arm is not None else []
+        take = ops_mod.find_take(arm.name, props.selected_take_id) if arm is not None else None
+
+        if not takes:
+            box.label(text="Todavía no hay ninguna toma.", icon="INFO")
+        elif take is None:
+            # selected_take_id vacío o apunta a una toma ya eliminada.
+            box.label(text=f"{len(takes)} toma(s) disponible(s) — elige una", icon="INFO")
+            box.menu("PUPPET_MT_take_list", text="Elegir toma")
+        else:
+            f0, f1 = take["frame_range"]
+            fps = context.scene.render.fps / context.scene.render.fps_base
+            dur = (f1 - f0) / fps if fps else 0.0
+            chans = []
+            if take["body_action"]:
+                chans.append("cuerpo")
+            if take["face_action"]:
+                chans.append("cara")
+            chan_txt = " + ".join(chans) if chans else "(sin canales)"
+            src_txt = {"kimodo": " · Kimodo", "correction": " · corregida"}.get(take["source"], "")
+            box.label(text=take["label"])
+            box.label(text=f"{dur:.1f} s ({f1 - f0} frames) · {chan_txt}{src_txt}")
+            if take["corrects"]:
+                box.label(text="Conserva la toma original sin corregir", icon="INFO")
+
+            row = box.row(align=True)
+            row.enabled = not running
+            row.prop(props, "play_take",
+                     text="Pausar" if props.play_take else "Reproducir",
+                     icon="PAUSE" if props.play_take else "PLAY_SOUND", toggle=True)
+            sub = row.row(align=True)
+            sub.enabled = not running
+            sub.operator("puppet_mocap.new_take", text="Nueva toma", icon="ADD")
+
+            opt = box.column(align=True)
+            opt.label(text="Opciones de la toma:")
+            if len(takes) > 1:
+                opt.menu("PUPPET_MT_take_list", text="Elegir otra toma…")
+            corr_row = opt.row(align=True)
+            corr_row.enabled = (not running) and (not props.is_recording) and bool(take["body_action"])
+            corr_row.operator("puppet_mocap.lock_current_take", text="Corregir pies", icon="MOD_DYNAMICPAINT")
+            if not corr_row.enabled and running:
+                opt.label(text="Detén la cámara para corregir pies", icon="ERROR")
+            del_row = opt.row(align=True)
+            del_row.operator("puppet_mocap.clear_keyframes", text="Eliminar esta toma", icon="TRASH")
 
         # --- Rig ---
         box = layout.box()
@@ -435,4 +504,4 @@ class PUPPET_PT_main(bpy.types.Panel):
                         col.operator("puppet_mocap.open_kimodo_log", text="Ver detalles")
 
 
-CLASSES = (PUPPET_PT_main,)
+CLASSES = (PUPPET_MT_take_list, PUPPET_PT_main)

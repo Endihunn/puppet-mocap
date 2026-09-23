@@ -8,7 +8,7 @@ def _poll_armature(self, obj):
 
 def _play_take_update(self, context):
     from . import operators
-    operators.set_take_playback(self.play_take)
+    operators.set_take_playback(self, self.play_take)
 
 
 # --- Kimodo: prompts de ejemplo (en inglés, con label en español) ----------
@@ -111,10 +111,16 @@ class PuppetMocapProperties(bpy.types.PropertyGroup):
     )
     play_take: bpy.props.BoolProperty(
         name="Reproducir toma",
-        description="Asigna la última toma horneada al rig y la reproduce. Desactívalo para pausar y volver a la captura en vivo.",
+        description="Asigna la toma seleccionada al rig y la reproduce. Desactívalo para pausar (la toma se queda asignada; volver a la captura en vivo es 'Iniciar vista previa').",
         default=False,
         options={"SKIP_SAVE"},
         update=_play_take_update,
+    )
+    selected_take_id: bpy.props.StringProperty(
+        name="Toma seleccionada",
+        description="Id interno de la toma sobre la que actúan Reproducir/Pausar, "
+                     "Eliminar y Corregir pies (Fase 3: registro real de tomas)",
+        default="",
     )
 
     # Settings persistidos

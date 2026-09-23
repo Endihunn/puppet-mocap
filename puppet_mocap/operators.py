@@ -165,37 +165,42 @@ def _sync_target(props):
     retarget.set_target_armature(obj.name if obj is not None else None)
 
 
-def _assign_action(id_data, kind: str, play: bool):
-    """Asigna/desasigna la última toma horneada (por nombre) a `id_data`."""
-    name = _baked_state.get(kind)
-    if play:
-        if not name:
-            return
-        action = bpy.data.actions.get(name)
-        if action is None:
-            return
-        ad = id_data.animation_data
-        if ad is None:
-            ad = id_data.animation_data_create()
-        ad.action = action  # auto-asigna el slot (verificado en Blender 5.1)
-    else:
+def _assign_action(id_data, action_name):
+    """Asigna la action `action_name` a id_data.animation_data.action, o la
+    desasigna (conservando fake_user) si `action_name` es None."""
+    if action_name is None:
         ad = id_data.animation_data
         if ad is not None and ad.action is not None:
             ad.action.use_fake_user = True
             ad.action = None
+        return
+    action = bpy.data.actions.get(action_name)
+    if action is None:
+        return
+    ad = id_data.animation_data
+    if ad is None:
+        ad = id_data.animation_data_create()
+    ad.action = action  # auto-asigna el slot (verificado en Blender 5.1)
 
 
-def set_take_playback(play: bool):
-    """Toggle "Reproducir toma": re-asigna la última toma (cuerpo + cara) al
-    armature objetivo Y reproduce la animación (o pausa + desasigna para
-    volver a la captura en vivo). Antes solo asignaba — el usuario tenía que
-    darle Play a mano en la línea de tiempo (P1, hallazgo #3)."""
-    arm = retarget.get_armature()
-    if arm is not None:
-        _assign_action(arm, "body", play)
-        mesh = retarget.face.get_cached_mesh(arm)
-        if mesh is not None and mesh.data.shape_keys is not None:
-            _assign_action(mesh.data.shape_keys, "face", play)
+def set_take_playback(props, play: bool):
+    """"Reproducir / Pausar" sobre la toma SELECCIONADA (props.selected_take_id,
+    Fase 3: registro real de tomas, no solo "la última").
+
+    play=True: asigna esa toma (cuerpo + cara) al rig y reproduce.
+    play=False: SOLO pausa -- la toma se queda asignada. Antes pausar también
+    desasignaba y volvía a la captura en vivo como efecto secundario; ahora
+    eso es una acción aparte (detach_take_for_live_capture), porque el brief
+    de Fase 3 pide que "Pausar debe conservar la toma asignada"."""
+    if play:
+        arm = retarget.get_armature()
+        if arm is not None:
+            take = find_take(arm.name, props.selected_take_id)
+            if take is not None:
+                _assign_action(arm, take["body_action"])
+                mesh = retarget.face.get_cached_mesh(arm)
+                if mesh is not None and mesh.data.shape_keys is not None:
+                    _assign_action(mesh.data.shape_keys, take["face_action"])
     screen = bpy.context.screen
     if screen is None:
         return
@@ -205,6 +210,21 @@ def set_take_playback(play: bool):
         if not screen.is_animation_playing:
             bpy.ops.screen.animation_play()
     elif screen.is_animation_playing:
+        bpy.ops.screen.animation_cancel(restore_frame=False)
+
+
+def detach_take_for_live_capture():
+    """Desasigna cualquier toma del rig para volver a la captura en vivo.
+    Se llama SOLO al iniciar una nueva captura -- pausar ya NO hace esto
+    (ver set_take_playback)."""
+    arm = retarget.get_armature()
+    if arm is not None:
+        _assign_action(arm, None)
+        mesh = retarget.face.get_cached_mesh(arm)
+        if mesh is not None and mesh.data.shape_keys is not None:
+            _assign_action(mesh.data.shape_keys, None)
+    screen = bpy.context.screen
+    if screen is not None and screen.is_animation_playing:
         bpy.ops.screen.animation_cancel(restore_frame=False)
 
 
@@ -648,7 +668,11 @@ def _kimodo_bake(props, out_path) -> str:
         path = f'pose.bones["{esc}"].location'
         for i in range(3):
             channels[(path, i, bone)] = [(start + f, v[i]) for f, v in pts]
-    action = _bake_channels(arm, "OBJECT", "PuppetTake", channels, owner=arm.name)
+    take_id = new_take_id()
+    take_label = new_take_label() + " (Kimodo)"
+    action = _bake_channels(arm, "OBJECT", "PuppetTake", channels, owner=arm.name,
+                             take_id=take_id, take_label=take_label, take_kind="body",
+                             take_source="kimodo")
     _baked_state["body"] = action.name   # el postproceso la re-asigna por nombre
     n_frames = int(motion["posed_joints"].shape[0])
 
@@ -660,7 +684,7 @@ def _kimodo_bake(props, out_path) -> str:
     if root_bone and rest3_root is not None and (props.kimodo_foot_lock
                                                  or props.kimodo_ground_snap):
         from .kimodo import postbake
-        _assign_action(arm, "body", True)
+        _assign_action(arm, action.name)
         try:
             if props.kimodo_foot_lock:
                 # el nombre de joint del pie depende del esqueleto (SOMA/SMPL-X)
@@ -684,11 +708,12 @@ def _kimodo_bake(props, out_path) -> str:
         except Exception:
             log.exception("postproceso de la toma de Kimodo")
         finally:
-            _assign_action(arm, "body", False)
+            _assign_action(arm, None)
 
     _baked_state["body"] = action.name
     _KIMODO_STATE["last_start"] = start
     props.kimodo_result_frames = n_frames
+    props.selected_take_id = take_id
     return action.name
 
 
@@ -730,12 +755,16 @@ def _kimodo_poll_timer():
 
 # --- Bake (buffer → fcurves) -----------------------------------------------
 
-def _bake_channels(id_data, id_type: str, name: str, channels: dict, owner: str = ""):
+def _bake_channels(id_data, id_type: str, name: str, channels: dict, owner: str = "",
+                    take_id: str = "", take_label: str = "", take_kind: str = "body",
+                    take_source: str = "capture", corrects: str = ""):
     """channels: {(data_path, index, group|None): [(frame, value), ...]}.
     API de slotted actions (Blender 4.4+; en 5.x action.fcurves ya no existe).
     foreach_set es órdenes de magnitud más rápido que keyframe_insert.
     `owner` marca la action con el nombre del armature dueño (T3) para que
-    "Borrar Keyframes" no destruya las tomas de OTROS rigs del archivo."""
+    "Eliminar esta toma" no destruya las tomas de OTROS rigs del archivo.
+    `take_id` empareja cuerpo+cara de la MISMA toma (Fase 3: registro real de
+    tomas, no solo "la última")."""
     action = bpy.data.actions.new(name)
     ad = id_data.animation_data
     if ad is None:
@@ -778,9 +807,105 @@ def _bake_channels(id_data, id_type: str, name: str, channels: dict, owner: str 
     # marcador; el panel la re-asigna con "Reproducir toma".
     action["puppet_mocap_take"] = True
     action["puppet_mocap_owner"] = owner
+    if take_id:
+        action["puppet_mocap_take_id"] = take_id
+        action["puppet_mocap_take_label"] = take_label or take_id
+        action["puppet_mocap_take_kind"] = take_kind
+        action["puppet_mocap_take_source"] = take_source
+        if corrects:
+            action["puppet_mocap_corrects"] = corrects
     action.use_fake_user = True
     ad.action = None
     return action
+
+
+_TAKE_SEQ = {"n": 0}
+
+
+def new_take_id() -> str:
+    """Id compartido por cuerpo+cara de UNA toma (Fase 3: registro real de
+    tomas). El sufijo evita colisión si dos tomas se hornean en el mismo
+    segundo (p.ej. en tests)."""
+    _TAKE_SEQ["n"] += 1
+    return f"{time.strftime('%Y%m%d_%H%M%S')}_{_TAKE_SEQ['n']:03d}"
+
+
+def new_take_label() -> str:
+    return time.strftime("Toma %Y-%m-%d %Hh%M")
+
+
+def list_takes(arm_name: str) -> list:
+    """Escanea bpy.data.actions y agrupa las marcadas de este rig por
+    puppet_mocap_take_id -- una 'toma' es un par (cuerpo, cara) que
+    comparte id, no solo 'la última acción horneada'. Tomas de una versión
+    anterior sin take_id (migración) se listan igual, una por action, con
+    su propio nombre de action como id -- así no desaparecen del historial,
+    aunque no se puedan emparejar con su contraparte de cara si la tenían."""
+    groups: dict = {}
+    for action in bpy.data.actions:
+        if not action.get("puppet_mocap_take") or action.get("puppet_mocap_owner") != arm_name:
+            continue
+        tid = action.get("puppet_mocap_take_id") or f"legacy:{action.name}"
+        g = groups.get(tid)
+        if g is None:
+            g = {
+                "take_id": tid,
+                "label": action.get("puppet_mocap_take_label") or action.name,
+                "source": action.get("puppet_mocap_take_source") or "capture",
+                "corrects": action.get("puppet_mocap_corrects") or None,
+                "body_action": None,
+                "face_action": None,
+                "frame_range": tuple(action.frame_range),
+            }
+            groups[tid] = g
+        kind = action.get("puppet_mocap_take_kind") or "body"
+        if kind == "face":
+            g["face_action"] = action.name
+        else:
+            g["body_action"] = action.name
+            g["frame_range"] = tuple(action.frame_range)
+    return sorted(groups.values(), key=lambda g: g["take_id"], reverse=True)
+
+
+def find_take(arm_name: str, take_id: str):
+    if not take_id:
+        return None
+    for take in list_takes(arm_name):
+        if take["take_id"] == take_id:
+            return take
+    return None
+
+
+def remove_selected_take(props) -> tuple:
+    """Elimina SOLO la toma seleccionada (props.selected_take_id) y sus
+    canales asociados (cuerpo + cara de ESA toma). Antes 'Eliminar esta
+    toma' recorría TODAS las tomas propias del rig -- demasiado amplio en
+    cuanto hay más de una toma para elegir (brief de Fase 3). Devuelve
+    (ok, mensaje)."""
+    arm = retarget.get_armature()
+    if arm is None:
+        return False, "No hay armature en la escena"
+    take = find_take(arm.name, props.selected_take_id)
+    if take is None:
+        return False, "No hay ninguna toma seleccionada"
+
+    mesh = retarget.face.get_cached_mesh(arm)
+    sks = mesh.data.shape_keys if mesh is not None else None
+
+    for id_data, action_name in ((arm, take["body_action"]), (sks, take["face_action"])):
+        if id_data is None or not action_name:
+            continue
+        action = bpy.data.actions.get(action_name)
+        if action is None:
+            continue
+        ad = id_data.animation_data
+        if ad is not None and ad.action is action:
+            ad.action = None
+        retarget.common.remove_take_if_safe(action)
+
+    remaining = list_takes(arm.name)
+    props.selected_take_id = remaining[0]["take_id"] if remaining else ""
+    return True, take["label"]
 
 
 def _bake_take(arm, samples, start_frame: int, fps: float):
@@ -818,6 +943,8 @@ def _bake_take(arm, samples, start_frame: int, fps: float):
             prev = q
         bone_tracks[name] = fixed
 
+    take_id = new_take_id()
+    take_label = new_take_label()
     body_action = None
     face_action = None
     if bone_tracks or loc_tracks:
@@ -832,7 +959,8 @@ def _bake_take(arm, samples, start_frame: int, fps: float):
             path = f'pose.bones["{esc}"].location'
             for i in range(3):
                 channels[(path, i, name)] = [(f, v[i]) for f, v in pts]
-        body_action = _bake_channels(arm, "OBJECT", "PuppetTake", channels, owner=arm.name)
+        body_action = _bake_channels(arm, "OBJECT", "PuppetTake", channels, owner=arm.name,
+                                      take_id=take_id, take_label=take_label, take_kind="body")
 
     if shape_tracks:
         mesh = retarget.face.get_cached_mesh(arm)
@@ -843,12 +971,13 @@ def _bake_take(arm, samples, start_frame: int, fps: float):
             }
             face_action = _bake_channels(
                 mesh.data.shape_keys, "KEY", "PuppetTake_cara", channels,
-                owner=arm.name)
+                owner=arm.name, take_id=take_id, take_label=take_label, take_kind="face")
 
     _baked_state["body"] = body_action.name if body_action is not None else None
     _baked_state["face"] = face_action.name if face_action is not None else None
-    name = _baked_state["body"] or _baked_state["face"]
-    return name, (frames[0], frames[-1])
+    if body_action is None and face_action is None:
+        return None
+    return take_id, (frames[0], frames[-1])
 
 
 def _finish_recording(scene, props):
@@ -866,7 +995,8 @@ def _finish_recording(scene, props):
             except Exception:
                 log.exception("bake de la toma")
         if result is not None:
-            _name, (f0, f1) = result
+            take_id, (f0, f1) = result
+            props.selected_take_id = take_id  # única fuente de verdad (T4)
             scene.frame_end = max(scene.frame_end, f1)
             scene.frame_current = st["start_frame"]
             log.info(f"toma horneada: frames {f0}-{f1} "
@@ -932,7 +1062,7 @@ def _drain_tick():
         }
         props.last_error = f"Captura terminó: {reasons.get(rc, f'código {rc}')}"
         log.warn(f"subprocess murió rc={rc}; apagando captura")
-        _finish_recording(scene, props)
+        _finish_recording(scene, props)  # ya deja selected_take_id al día
         _cleanup_capture(props, unregister_timer=False)
         _flush_ui_pulse(props)  # T4: volcar lo pendiente antes de apagar
         return None
@@ -1040,7 +1170,7 @@ def _drain_tick():
                 # P4: tope de muestras — no crecer sin límite en RAM.
                 log.warn(f"tope de muestras ({props.max_take_samples}); grabación auto-detenida")
                 props.last_error = f"Tope de muestras ({props.max_take_samples}); grabación detenida"
-                _finish_recording(scene, props)
+                _finish_recording(scene, props)  # ya deja selected_take_id al día
                 _tag_redraw_ui()
                 return 0.02
             snap = retarget.snapshot_pose(
@@ -1097,9 +1227,10 @@ class PUPPET_OT_start_capture(bpy.types.Operator):
         _sync_target(props)
         _load_calibration(props)
         # No dejar una toma reproduciéndose: sus fcurves pisarían la captura
-        # en vivo al cambiar de frame (P0-1).
+        # en vivo al cambiar de frame (P0-1). Esto es un detach real (vuelve
+        # a la captura en vivo), no un pausado -- ver set_take_playback.
         props.play_take = False
-        set_take_playback(False)
+        detach_take_for_live_capture()
         arm = retarget.get_armature()
         if arm is None:
             log.error("Sin armature al iniciar captura")
@@ -1245,7 +1376,7 @@ class PUPPET_OT_stop_capture(bpy.types.Operator):
         _cleanup_capture(props)
         log.banner("END CAPTURE")
         if result is not None:
-            _name, (f0, f1) = result
+            _take_id, (f0, f1) = result  # _finish_recording ya dejó selected_take_id al día
             self.report({"INFO"}, f"Captura detenida; toma horneada ({f0}-{f1})")
         else:
             self.report({"INFO"}, "Captura detenida")
@@ -1263,9 +1394,11 @@ class PUPPET_OT_toggle_record(bpy.types.Operator):
         if props.is_recording:
             result = _finish_recording(scene, props)
             if result is not None:
-                _name, (f0, f1) = result
+                take_id, (f0, f1) = result  # _finish_recording ya dejó selected_take_id al día
+                take = find_take(retarget.get_armature().name, take_id)
+                label = take["label"] if take else take_id
                 log.info(f"REC stop; toma {f0}-{f1}")
-                self.report({"INFO"}, f"Toma grabada: frames {f0}-{f1} (action '{_name}')")
+                self.report({"INFO"}, f"{label} grabada: frames {f0}-{f1}")
             else:
                 self.report({"INFO"}, "Grabación cancelada (sin datos)")
             return {"FINISHED"}
@@ -1306,21 +1439,49 @@ class PUPPET_OT_clear_keyframes(bpy.types.Operator):
     bl_idname = "puppet_mocap.clear_keyframes"
     bl_label = "Eliminar esta toma"
     bl_description = (
-        "Elimina la toma de Puppet Mocap del armature objetivo (cuerpo + cara). "
-        "Solo borra actions marcadas como propias; una animación ajena que hayas "
-        "asignado a mano se conserva"
+        "Elimina SOLO la toma seleccionada (cuerpo + cara de esa toma). "
+        "Otras tomas del mismo rig y cualquier animación ajena que hayas "
+        "asignado a mano se conservan"
     )
     bl_options = {"REGISTER", "UNDO"}
 
     def execute(self, context):
-        _sync_target(context.scene.puppet_mocap)
-        if retarget.clear_all_keyframes():
-            log.info("toma eliminada (cuerpo + cara)")
-            self.report({"INFO"}, "Toma eliminada")
+        props = context.scene.puppet_mocap
+        _sync_target(props)
+        ok, msg = remove_selected_take(props)
+        if ok:
+            log.info(f"toma eliminada: {msg}")
+            self.report({"INFO"}, f"{msg}: eliminada")
             return {"FINISHED"}
-        log.warn("clear_keyframes: sin armature")
-        self.report({"ERROR"}, "No hay armature en la escena")
+        log.warn(f"clear_keyframes: {msg}")
+        self.report({"ERROR"}, msg)
         return {"CANCELLED"}
+
+
+class PUPPET_OT_select_take(bpy.types.Operator):
+    bl_idname = "puppet_mocap.select_take"
+    bl_label = "Elegir esta toma"
+    bl_description = "Selecciona esta toma como la toma actual para Reproducir/Eliminar/Corregir"
+    bl_options = {"REGISTER", "UNDO"}
+
+    take_id: bpy.props.StringProperty()
+
+    def execute(self, context):
+        props = context.scene.puppet_mocap
+        props.selected_take_id = self.take_id
+        return {"FINISHED"}
+
+
+class PUPPET_OT_new_take(bpy.types.Operator):
+    bl_idname = "puppet_mocap.new_take"
+    bl_label = "Nueva toma"
+    bl_description = "Deja de reproducir la toma seleccionada y vuelve a la captura en vivo"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        detach_take_for_live_capture()
+        context.scene.puppet_mocap.play_take = False
+        return {"FINISHED"}
 
 
 class PUPPET_OT_reset_rig(bpy.types.Operator):
@@ -1397,10 +1558,11 @@ class PUPPET_OT_calibrate_ground(bpy.types.Operator):
 
 class PUPPET_OT_lock_current_take(bpy.types.Operator):
     bl_idname = "puppet_mocap.lock_current_take"
-    bl_label = "Clavar pies de la toma"
+    bl_label = "Corregir pies"
     bl_description = (
-        "Duplica la action activa y hornea la corrección del Hips e IK de piernas "
-        "para que los pies de apoyo no patinen"
+        "Duplica la toma SELECCIONADA y hornea la corrección del Hips e IK de "
+        "piernas para que los pies de apoyo no patinen. La toma original se "
+        "conserva sin tocar; la corregida queda como una toma nueva"
     )
     bl_options = {"REGISTER", "UNDO"}
 
@@ -1411,13 +1573,16 @@ class PUPPET_OT_lock_current_take(bpy.types.Operator):
             return {"CANCELLED"}
         _sync_target(props)
         arm = retarget.get_armature()
-        action = (arm.animation_data.action
-                  if arm is not None and arm.animation_data is not None else None)
         if arm is None:
             self.report({"ERROR"}, "No hay armature en la escena")
             return {"CANCELLED"}
+        take = find_take(arm.name, props.selected_take_id)
+        if take is None or not take["body_action"]:
+            self.report({"ERROR"}, "La toma seleccionada no tiene canal de cuerpo")
+            return {"CANCELLED"}
+        action = bpy.data.actions.get(take["body_action"])
         if action is None:
-            self.report({"ERROR"}, "El armature no tiene una action activa")
+            self.report({"ERROR"}, "La action de la toma seleccionada ya no existe")
             return {"CANCELLED"}
 
         from .retarget import foot_lock as foot_lock_mod
@@ -1434,9 +1599,19 @@ class PUPPET_OT_lock_current_take(bpy.types.Operator):
         if new_action is None:
             self.report({"ERROR"}, "No encontré Hips y al menos un hueso Foot")
             return {"CANCELLED"}
+        # Toma NUEVA (id propio) que apunta a la original vía "corrects" —
+        # la original NUNCA se toca ni se borra (brief: "mantener copia
+        # original al corregir tomas").
+        new_take_id_ = new_take_id()
         new_action["puppet_mocap_take"] = True
         new_action["puppet_mocap_owner"] = arm.name
+        new_action["puppet_mocap_take_id"] = new_take_id_
+        new_action["puppet_mocap_take_label"] = f"{take['label']} (pies corregidos)"
+        new_action["puppet_mocap_take_kind"] = "body"
+        new_action["puppet_mocap_take_source"] = "correction"
+        new_action["puppet_mocap_corrects"] = take["take_id"]
         _baked_state["body"] = new_action.name
+        props.selected_take_id = new_take_id_
         props.play_take = True
 
         locked_frames = int(stats)
@@ -1995,7 +2170,7 @@ class PUPPET_OT_play_kimodo_take(bpy.types.Operator):
     def execute(self, context):
         props = context.scene.puppet_mocap
         context.scene.frame_current = int(_KIMODO_STATE.get("last_start", 1) or 1)
-        set_take_playback(True)
+        set_take_playback(props, True)
         props.play_take = True
         return {"FINISHED"}
 
@@ -2055,6 +2230,8 @@ CLASSES = (
     PUPPET_OT_stop_capture,
     PUPPET_OT_toggle_record,
     PUPPET_OT_clear_keyframes,
+    PUPPET_OT_select_take,
+    PUPPET_OT_new_take,
     PUPPET_OT_reset_rig,
     PUPPET_OT_lock_current_take,
     PUPPET_OT_foot_lock_now,
