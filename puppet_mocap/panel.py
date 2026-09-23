@@ -62,7 +62,12 @@ def _kimodo_checklist(ops_mod, props):
 
 
 def _module_box(layout, props, title, icon, enable_attr, record_attr, locked=False):
-    """Caja con header (toggle de habilitar) y switch de grabación.
+    """Caja con un selector por módulo (brief Fase 3: "un selector por
+    módulo en modo básico. Grabar los módulos seleccionados"). En modo
+    básico el único toggle decide captura Y grabación juntas (ver
+    _enable_*_update en properties.py); en Avanzado (props.modulos_advanced)
+    se ve también el control independiente de grabar, para superponer
+    manos/cara sobre una animación de cuerpo ya grabada.
 
     `locked=True` (captura corriendo) grisa el toggle de habilitar: el
     proceso externo decide qué modelos cargar AL LANZARSE según
@@ -77,9 +82,10 @@ def _module_box(layout, props, title, icon, enable_attr, record_attr, locked=Fal
     enable_row.enabled = not locked
     enable_row.prop(props, enable_attr, text="")
     row.label(text=title, icon=icon)
-    sub = row.row(align=True)
-    sub.active = getattr(props, enable_attr)
-    sub.prop(props, record_attr, text="Grabar", toggle=True)
+    if props.modulos_advanced:
+        sub = row.row(align=True)
+        sub.active = getattr(props, enable_attr)
+        sub.prop(props, record_attr, text="Grabar", toggle=True)
     if locked:
         box.label(
             text="Fijo durante la captura — detén e inicia de nuevo para cambiarlo",
@@ -168,28 +174,13 @@ class PUPPET_PT_main(bpy.types.Panel):
             if running:
                 adv.label(text="Detén la cámara para cambiar el índice", icon="INFO")
 
-        # --- Estado ---
-        box = layout.box()
-        col = box.column(align=True)
         connected = server.is_client_connected()
-        if running and connected:
-            col.label(text="Server: corriendo, cliente conectado", icon="LINKED")
-        elif running:
-            col.label(text="Server: esperando cliente...", icon="UNLINKED")
-        else:
-            col.label(text="Server: detenido", icon="REMOVE")
-        proc = ops_mod._subprocess_state.get("proc")
-        if proc is not None:
-            alive = proc.poll() is None
-            col.label(
-                text=f"Proceso: PID {proc.pid} ({'vivo' if alive else 'muerto'})",
-                icon="PLAY" if alive else "CANCEL",
-            )
-        col.label(text=f"Frames recibidos: {props.frames_received}")
-        if props.last_error:
-            col.label(text=props.last_error, icon="ERROR")
 
-        # --- Módulos: Cuerpo ---
+        # --- Módulos ---
+        mrow = layout.row(align=True)
+        mrow.prop(props, "modulos_advanced", text="Grabar canales por separado (Avanzado)",
+                  toggle=True, icon="PREFERENCES")
+
         box = _module_box(layout, props, "Cuerpo", "ARMATURE_DATA",
                           "enable_body", "record_body", locked=running)
         if props.enable_body:
@@ -242,7 +233,8 @@ class PUPPET_PT_main(bpy.types.Panel):
                     )
 
         # --- Espejo ---
-        layout.prop(props, "mirror_motion", icon="MOD_MIRROR")
+        layout.prop(props, "mirror_motion", text="Espejo (verte de frente como en un espejo)",
+                    icon="MOD_MIRROR")
 
         # --- Calibración ---
         box = layout.box()
@@ -268,15 +260,31 @@ class PUPPET_PT_main(bpy.types.Panel):
         elif not running:
             col.label(text="Inicia la vista previa para calibrar", icon="INFO")
 
-        # --- Captura ---
+        # --- Captura --- (estado resumido; detalle técnico va a Diagnóstico)
         box = layout.box()
         box.label(text="Captura", icon="OUTLINER_OB_CAMERA")
+        if props.is_recording:
+            box.label(text="● Grabando", icon="REC")
+        elif running and connected:
+            box.label(text="Listo — cámara conectada", icon="CHECKMARK")
+        elif running:
+            box.label(text="Sin señal — esperando la cámara", icon="TIME")
+        else:
+            box.label(text="Preparando", icon="DOT")
+        if props.last_error:
+            box.label(text=props.last_error, icon="ERROR")
+
         if running:
             if props.is_recording:
                 box.label(text="Esto también finalizará la grabación en curso", icon="INFO")
             box.operator("puppet_mocap.stop_capture", text="Detener cámara", icon="PAUSE")
         else:
-            box.operator("puppet_mocap.start_capture", text="Iniciar vista previa", icon="PLAY")
+            can_prev, prev_reason = ops_mod.can_start_preview(props)
+            prow = box.row(align=True)
+            prow.enabled = can_prev
+            prow.operator("puppet_mocap.start_capture", text="Iniciar vista previa", icon="PLAY")
+            if not can_prev:
+                box.label(text=prev_reason, icon="ERROR")
 
         # --- Grabación ---
         box = layout.box()
@@ -389,6 +397,21 @@ class PUPPET_PT_main(bpy.types.Panel):
         box = layout.box()
         box.label(text="Diagnóstico", icon="CONSOLE")
         col = box.column(align=True)
+        if running and connected:
+            col.label(text="Server: corriendo, cliente conectado", icon="LINKED")
+        elif running:
+            col.label(text="Server: esperando cliente...", icon="UNLINKED")
+        else:
+            col.label(text="Server: detenido", icon="REMOVE")
+        proc = ops_mod._subprocess_state.get("proc")
+        if proc is not None:
+            alive = proc.poll() is None
+            col.label(
+                text=f"Proceso: PID {proc.pid} ({'vivo' if alive else 'muerto'})",
+                icon="PLAY" if alive else "CANCEL",
+            )
+        col.label(text=f"Frames recibidos: {props.frames_received}")
+        col.separator()
         row = col.row(align=True)
         row.enabled = not props.deps_checking
         row.operator("puppet_mocap.check_deps", icon="CHECKMARK")

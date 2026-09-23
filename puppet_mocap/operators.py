@@ -2006,6 +2006,23 @@ class PUPPET_OT_clear_log(bpy.types.Operator):
         return {"FINISHED"}
 
 
+def can_start_preview(props) -> tuple[bool, str]:
+    """Elegibilidad para 'Iniciar vista previa', compartida entre panel y
+    operador (mismo patrón que can_start_recording). Estado 'Sin configurar'
+    del brief de Fase 3: indicar el requisito faltante, no solo dejar el
+    botón ahí para que falle al pulsarlo."""
+    if not (props.enable_body or props.enable_hands or props.enable_face):
+        return False, "Activa al menos un módulo (Cuerpo, Manos o Cara)"
+    _sync_target(props)  # no toca datos ID -- seguro en draw()
+    ok, msg = _validate_rig(props, include_body=props.enable_body,
+                            include_hands=props.enable_hands, write=False)
+    if not ok:
+        return False, msg
+    if not props.python_path:
+        return False, "Configura el Python externo (Ajustes avanzados)"
+    return True, ""
+
+
 def can_start_recording(props) -> tuple[bool, str]:
     """Elegibilidad compartida entre panel y operador para 'Grabar' (P1,
     hallazgo #6): antes el botón se dibujaba siempre disponible y

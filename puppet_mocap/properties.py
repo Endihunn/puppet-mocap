@@ -30,6 +30,25 @@ def _kimodo_example_update(self, context):
     self.kimodo_prompt = self.kimodo_example
 
 
+def _enable_body_update(self, context):
+    # Modo básico (brief Fase 3: "un selector por módulo"): activar/desactivar
+    # Cuerpo activa/desactiva grabarlo también. En Avanzado el usuario puede
+    # desincronizarlos a mano (p.ej. superponer manos sobre un cuerpo ya
+    # grabado) y eso se conserva mientras no vuelva a tocar este toggle.
+    if not self.modulos_advanced:
+        self.record_body = self.enable_body
+
+
+def _enable_hands_update(self, context):
+    if not self.modulos_advanced:
+        self.record_hands = self.enable_hands
+
+
+def _enable_face_update(self, context):
+    if not self.modulos_advanced:
+        self.record_face = self.enable_face
+
+
 def _kimodo_seed_use_update(self, context):
     """Al activar 'Resultado repetible' con semilla todavía en -1 (aleatoria),
     fija una semilla concreta para que el toggle tenga efecto inmediato — antes
@@ -228,18 +247,31 @@ class PuppetMocapProperties(bpy.types.PropertyGroup):
     # --- Toggles de módulos ---
     enable_body: bpy.props.BoolProperty(
         name="Cuerpo",
-        description="Capturar y aplicar pose corporal (brazos, piernas, hips, cuello, cabeza).",
+        description="Capturar y aplicar pose corporal (brazos, piernas, hips, cuello, cabeza). "
+                     "En modo básico, también lo grava; en Avanzado se puede separar.",
         default=True,
+        update=_enable_body_update,
     )
     enable_hands: bpy.props.BoolProperty(
         name="Manos",
-        description="Capturar y aplicar orientación de muñecas y dedos.",
+        description="Capturar y aplicar orientación de muñecas y dedos. "
+                     "En modo básico, también las grava; en Avanzado se puede separar.",
         default=True,
+        update=_enable_hands_update,
     )
     enable_face: bpy.props.BoolProperty(
         name="Cara",
-        description="Capturar y aplicar blendshapes faciales (requiere face_landmarker.task y un mesh con shape keys ARKit).",
+        description="Capturar y aplicar blendshapes faciales (requiere face_landmarker.task y un "
+                     "mesh con shape keys ARKit). En modo básico, también la grava.",
         default=False,
+        update=_enable_face_update,
+    )
+    modulos_advanced: bpy.props.BoolProperty(
+        name="Avanzado (módulos)",
+        description="Grabar canales por separado de lo que ves en vivo — p.ej. superponer manos "
+                     "o cara sobre una animación de cuerpo que ya grabaste antes",
+        default=False,
+        options={"SKIP_SAVE"},
     )
     enable_root_translation: bpy.props.BoolProperty(
         name="Traslación de raíz",
