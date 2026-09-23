@@ -189,7 +189,22 @@ class PUPPET_PT_main(bpy.types.Panel):
             # P1 (hallazgo #5): foot_lock está activo por default y afecta el
             # retarget en vivo, pero antes no tenía ningún control en el
             # panel — el usuario no podía verlo ni apagarlo sin la consola.
-            sub.prop(props, "foot_lock", text="Estabilizar pies")
+            fl_row = sub.row(align=True)
+            fl_row.prop(props, "foot_lock", text="Estabilizar pies")
+            fl_row.prop(props, "configurar_suelo", text="", icon="PREFERENCES", toggle=True)
+            if props.configurar_suelo:
+                gcol = sub.column(align=True)
+                gcol.active = props.foot_lock
+                gcol.prop(props, "ground_mode")
+                if props.ground_mode == "PLANE_Z":
+                    grow = gcol.row(align=True)
+                    grow.prop(props, "ground_z")
+                    grow.operator("puppet_mocap.calibrate_ground", text="", icon="EYEDROPPER")
+                elif props.ground_mode == "OBJECT_RAYCAST":
+                    gcol.prop(props, "ground_object")
+                gcol.prop(props, "sole_offset")
+                gcol.prop(props, "foot_lock_sensitivity")
+                gcol.prop(props, "foot_lock_mode")
             sub.prop(props, "enable_root_translation")
             if props.enable_root_translation:
                 sub.prop(props, "root_translation_scale")

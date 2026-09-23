@@ -286,6 +286,12 @@ class PuppetMocapProperties(bpy.types.PropertyGroup):
         ),
         default=True,
     )
+    configurar_suelo: bpy.props.BoolProperty(
+        name="Configurar suelo",
+        description="Cómo se define la altura del suelo, sensibilidad y modo de apoyo",
+        default=False,
+        options={"SKIP_SAVE"},
+    )
     foot_lock_speed: bpy.props.FloatProperty(
         name="Umbral de apoyo",
         description=(
