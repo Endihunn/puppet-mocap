@@ -449,7 +449,7 @@ def _validate_rig(props, include_body: bool = True, include_hands: bool = True,
     """
     arm = retarget.get_armature()
     if arm is None:
-        return False, "No hay un armature en la escena. Importa un FBX Mixamo primero."
+        return False, "Sin armature. Importa un FBX Mixamo."
     expected = retarget.get_keyframe_bones(
         props.bone_prefix, include_body=include_body, include_hands=include_hands)
     if expected:

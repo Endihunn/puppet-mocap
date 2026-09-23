@@ -87,10 +87,7 @@ def _module_box(layout, props, title, icon, enable_attr, record_attr, locked=Fal
         sub.active = getattr(props, enable_attr)
         sub.prop(props, record_attr, text="Grabar", toggle=True)
     if locked:
-        box.label(
-            text="Fijo durante la captura — detén e inicia de nuevo para cambiarlo",
-            icon="LOCKED",
-        )
+        box.label(text="Fijo durante la captura", icon="LOCKED")
     return box
 
 
@@ -248,7 +245,7 @@ class PUPPET_PT_main(bpy.types.Panel):
                     )
 
         # --- Espejo ---
-        layout.prop(props, "mirror_motion", text="Espejo (verte de frente como en un espejo)",
+        layout.prop(props, "mirror_motion", text="Espejo (verte de frente)",
                     icon="MOD_MIRROR")
 
         # --- Calibración ---
@@ -291,7 +288,7 @@ class PUPPET_PT_main(bpy.types.Panel):
 
         if running:
             if props.is_recording:
-                box.label(text="Esto también finalizará la grabación en curso", icon="INFO")
+                box.label(text="También finaliza la grabación", icon="INFO")
             box.operator("puppet_mocap.stop_capture", text="Detener cámara", icon="PAUSE")
         else:
             can_prev, prev_reason = ops_mod.can_start_preview(props)
@@ -386,7 +383,7 @@ class PUPPET_PT_main(bpy.types.Panel):
             sub.enabled = not running
             sub.operator("puppet_mocap.new_take", text="Nueva toma", icon="ADD")
             if running:
-                box.label(text="Detén la cámara para reproducir una toma", icon="INFO")
+                box.label(text="Detén la cámara para reproducir", icon="INFO")
 
             opt = box.column(align=True)
             opt.label(text="Opciones de la toma:")
@@ -438,7 +435,7 @@ class PUPPET_PT_main(bpy.types.Panel):
         if not fs["face_model"]:
             missing_models.append("cara")
         if missing_models:
-            col.label(text=f"Modelos faltantes: {', '.join(missing_models)}", icon="ERROR")
+            col.label(text=f"Faltan: {', '.join(missing_models)}", icon="ERROR")
             row = col.row(align=True)
             row.enabled = not props.models_downloading
             row.operator("puppet_mocap.download_models", icon="IMPORT")
@@ -468,8 +465,7 @@ class PUPPET_PT_main(bpy.types.Panel):
         # Estos solo se leen al INICIAR captura — editarlos a media sesión no
         # hace nada, así que se bloquean para no confundir
         if running:
-            box.label(text="Fijo durante la captura — detén e inicia de nuevo para cambiarlo",
-                      icon="LOCKED")
+            box.label(text="Fijo durante la captura", icon="LOCKED")
         launch = box.column(align=True)
         launch.enabled = not running
         # cam_index vive en Personaje y cámara > Avanzado (junto al nombre

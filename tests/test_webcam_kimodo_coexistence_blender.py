@@ -59,7 +59,7 @@ def test_generate_motion_reaches_later_validation_when_capture_not_running():
     props.kimodo_python_path = ""
     server._state["thread"] = None
 
-    with pytest.raises(RuntimeError, match="No hay un armature"):
+    with pytest.raises(RuntimeError, match="Sin armature"):
         bpy.ops.puppet_mocap.generate_motion()
 
 
