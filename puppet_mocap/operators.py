@@ -80,7 +80,15 @@ def run_async(work_fn, on_done, poll_interval: float = 0.2):
     def _poll():
         if not box["done"]:
             return poll_interval
-        on_done(box["result"], box["error"])
+        try:
+            on_done(box["result"], box["error"])
+        except Exception:
+            # on_done escribe en props del Scene; si el addon se desregistró
+            # o el archivo cambió mientras el hilo corría, esas props ya no
+            # existen. Tolerarlo (el trabajo en sí ya terminó) en vez de
+            # dejar una traceback en la consola por un job que el usuario
+            # ya no puede ver.
+            log.exception("run_async: on_done falló (¿addon desregistrado/archivo recargado?)")
         return None
 
     bpy.app.timers.register(_poll, first_interval=poll_interval)
@@ -309,6 +317,7 @@ def _on_load_pre(*_args):
     try:
         log.info("load_pre: apagando captura")
         _cleanup_capture(None)
+        _kill_kimodo_proc()  # si no, el proceso de generación (torch) queda huérfano
         retarget.common._state["arm"] = None
         retarget.reset_smoothing()
         _baked_state["body"] = None
@@ -325,6 +334,8 @@ def register_handlers():
 def unregister_handlers():
     if _on_load_pre in bpy.app.handlers.load_pre:
         bpy.app.handlers.load_pre.remove(_on_load_pre)
+    _kill_kimodo_proc()  # deshabilitar el addon a media generación no debe
+    # dejar el proceso de torch corriendo huérfano en segundo plano
 
 
 def _tag_redraw_ui():
