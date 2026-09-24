@@ -16,6 +16,8 @@ Por eso:
 """
 import threading
 import time
+from pathlib import Path
+from types import SimpleNamespace
 
 import bpy
 
@@ -35,6 +37,22 @@ def _register_operator_once(cls):
         bpy.utils.register_class(cls)
     except ValueError:
         pass  # ya registrada por otro test de este archivo en la misma sesión
+
+
+def test_capture_python_uses_bundled_runtime_for_default_and_honors_override(
+        tmp_path, monkeypatch):
+    bundled = tmp_path / "python.exe"
+    bundled.write_bytes(b"test runtime placeholder")
+    monkeypatch.setattr(operators, "_bundled_capture_python_path", lambda: bundled)
+
+    props = SimpleNamespace(python_path="py")
+    assert operators._capture_python_path(props) == str(bundled)
+    assert operators._using_bundled_capture_python(props)
+
+    alternate = tmp_path / "alternate-python.exe"
+    props.python_path = str(alternate)
+    assert operators._capture_python_path(props) == str(alternate)
+    assert not operators._using_bundled_capture_python(props)
 
 
 # --- run_async como unidad aislada ------------------------------------------

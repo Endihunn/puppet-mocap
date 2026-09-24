@@ -402,8 +402,8 @@ class PuppetMocapProperties(bpy.types.PropertyGroup):
         default=False,
     )
     python_path: bpy.props.StringProperty(
-        name="Python externo",
-        description="Ruta al python.exe (donde está MediaPipe instalado). 'py' usa el launcher de Windows.",
+        name="Python de captura",
+        description="Con el valor por defecto se usa el Python incluido en la beta; indica otra ruta para anularlo.",
         default="py",
         subtype="FILE_PATH",
     )

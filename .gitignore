@@ -4,6 +4,7 @@ desktop.ini
 
 # releases / bundles are artifacts, not commits
 *.zip
+addon/bundle_resources/
 
 # MediaPipe models are downloaded on demand (PUPPET_OT_download_models)
 *.task
@@ -17,3 +18,6 @@ __pycache__/
 test_project.blend
 test_project.blend1
 .venv-test/
+
+.blender_test_profile/
+

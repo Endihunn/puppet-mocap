@@ -170,6 +170,32 @@ def _capture_runner_path() -> Path:
     return _addon_dir() / "capture" / "capture_runner.py"
 
 
+def _bundled_capture_python_path() -> Path:
+    """Python portable incluido en el paquete de Windows para compartir."""
+    return _addon_dir() / "runtime" / "python.exe"
+
+
+def _capture_python_path(props) -> str:
+    """Usa el Python empaquetado si el campo conserva su valor por defecto.
+
+    `py` se mantiene como fallback para instalaciones de desarrollo o paquetes
+    antiguos que no traen runtime. Una ruta elegida explícitamente siempre
+    tiene prioridad.
+    """
+    configured = (props.python_path or "").strip()
+    if configured.lower() in {"", "py", "python", "python.exe"}:
+        bundled = _bundled_capture_python_path()
+        if bundled.is_file():
+            return str(bundled)
+    return configured or "py"
+
+
+def _using_bundled_capture_python(props) -> bool:
+    configured = (props.python_path or "").strip().lower()
+    return (configured in {"", "py", "python", "python.exe"}
+            and _bundled_capture_python_path().is_file())
+
+
 def _model_path() -> Path:
     return _addon_dir() / "models" / "pose_landmarker_lite.task"
 
@@ -1331,15 +1357,20 @@ class PUPPET_OT_start_capture(bpy.types.Operator):
             self.report({"ERROR"}, f"capture_runner no encontrado: {runner}")
             return {"CANCELLED"}
 
-        cmd = [
-            props.python_path,
+        capture_python = _capture_python_path(props)
+        bundled_python = _using_bundled_capture_python(props)
+        cmd = [capture_python]
+        if bundled_python:
+            # El runtime portable no debe leer paquetes del Python del usuario.
+            cmd.append("-s")
+        cmd.extend([
             str(runner),
             "--addon-port", str(props.server_port),
             "--cam", str(props.cam_index),
             "--fps", str(props.send_fps),
             "--smooth-min-cutoff", str(props.smooth_min_cutoff),
             "--smooth-beta", str(props.smooth_beta),
-        ]
+        ])
 
         # El pose model también ancla las muñecas para las manos: manos sin
         # cuerpo antes enviaba exactamente CERO datos, en silencio.
@@ -1402,6 +1433,14 @@ class PUPPET_OT_start_capture(bpy.types.Operator):
         # Callar el spam por-frame de absl/TF en el log del subprocess
         env.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
         env.setdefault("GLOG_minloglevel", "2")
+        if bundled_python:
+            runtime_dir = str(_bundled_capture_python_path().parent)
+            env["PYTHONNOUSERSITE"] = "1"
+            env["PATH"] = os.pathsep.join((
+                runtime_dir,
+                os.path.join(runtime_dir, "DLLs"),
+                env.get("PATH", ""),
+            ))
 
         try:
             proc = subprocess.Popen(
@@ -1414,8 +1453,8 @@ class PUPPET_OT_start_capture(bpy.types.Operator):
         except FileNotFoundError:
             server.stop()
             _close_capture_log()
-            log.error(f"Python externo no encontrado: {props.python_path}")
-            self.report({"ERROR"}, f"Python no encontrado: {props.python_path}")
+            log.error(f"Python de captura no encontrado: {capture_python}")
+            self.report({"ERROR"}, f"Python no encontrado: {capture_python}")
             return {"CANCELLED"}
         except Exception as e:
             server.stop()
@@ -1826,15 +1865,27 @@ def _version_tuple(v: str) -> tuple:
 def _deps_check_work(python_path: str) -> dict:
     """Bloqueante (subprocess.run) — se ejecuta en un hilo de fondo vía
     run_async, nunca en el hilo principal."""
-    cmd = [
-        python_path, "-c",
+    bundled_python = python_path == str(_bundled_capture_python_path())
+    cmd = [python_path]
+    env = dict(os.environ)
+    if bundled_python:
+        cmd.append("-s")
+        runtime_dir = str(_bundled_capture_python_path().parent)
+        env["PYTHONNOUSERSITE"] = "1"
+        env["PATH"] = os.pathsep.join((
+            runtime_dir,
+            os.path.join(runtime_dir, "DLLs"),
+            env.get("PATH", ""),
+        ))
+    cmd.extend([
+        "-c",
         "import mediapipe, cv2, numpy; "
         "print(mediapipe.__version__ + '|' + cv2.__version__ + '|' + numpy.__version__)",
-    ]
+    ])
     flags = 0x08000000 if sys.platform == "win32" else 0  # CREATE_NO_WINDOW
     try:
         r = subprocess.run(cmd, capture_output=True, text=True,
-                           timeout=30, creationflags=flags)
+                           timeout=30, creationflags=flags, env=env)
         return {"kind": "ran", "returncode": r.returncode, "stdout": r.stdout, "stderr": r.stderr}
     except FileNotFoundError:
         return {"kind": "not_found"}
@@ -1852,7 +1903,7 @@ class PUPPET_OT_check_deps(bpy.types.Operator):
         if props.deps_checking:
             self.report({"WARNING"}, "Ya hay una verificación en curso")
             return {"CANCELLED"}
-        python_path = props.python_path
+        python_path = _capture_python_path(props)
 
         def _on_done(result, error):
             props.deps_checking = False

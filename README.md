@@ -2,7 +2,7 @@
 
 Mocap de webcam para Blender: MediaPipe (pose + manos + cara) → armature Mixamo, en vivo y con grabación de tomas. Sin dependencias dentro de Blender — MediaPipe corre en un proceso Python externo que manda JSON por TCP local.
 
-**Versión actual: 0.4.0** · Blender 4.4+ (probado en 5.1, Windows 11)
+**Versión actual: 0.4.2 beta** · Blender 4.4+ · paquete autocontenido para Windows x64
 
 ## Arquitectura
 
@@ -18,15 +18,19 @@ webcam → capture_runner.py (py externo: MediaPipe pose/hands/face, One Euro,
 ## Requisitos
 
 - Blender 4.4+ (usa la API de slotted actions; en 5.x ya no existe `action.fcurves`).
-- Python externo con `mediapipe` (≥ 0.10.0), `opencv-python`, `numpy` (`py -m pip install mediapipe opencv-python`). Verifícalo con el botón **Verificar dependencias** del panel.
+- El ZIP beta de Windows incluye Python portable, `mediapipe`, `opencv-contrib-python`, `numpy` y los modelos de pose, manos y cara. La captura por webcam no requiere instalar paquetes de Python ni descargar modelos.
 - Rig Mixamo (prefijo `mixamorig:` o el que detecte **Detectar prefijo**).
-- Modelos MediaPipe (`.task`): se descargan bajo demanda con el botón **Descargar modelos** del panel (pose + manos + cara). No van en el repo ni en el zip.
+- **Generar (Kimodo)** es una función opcional separada y conserva sus requisitos de runtime y modelo propios.
 
 ## Instalación
 
-1. `py scripts/pack_addon.py` → genera `addon/puppet_mocap.zip` (reproducible).
+1. `py scripts/pack_addon.py` → genera `addon/puppet_mocap.zip` cuando `addon/bundle_resources/` contiene runtime y modelos completos.
 2. Blender: Edit > Preferences > Add-ons > Install from Disk → el zip.
    (o headless: `blender --background --python scripts/install_addon.py -- --zip addon/puppet_mocap.zip`)
+
+El paquete de prueba es para Windows x64 y requiere Blender instalado. La
+captura por webcam usa el runtime incluido. El módulo opcional **Generar
+(Kimodo)** necesita su modelo/runtime independiente.
 
 ## Uso
 

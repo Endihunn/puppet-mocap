@@ -476,6 +476,8 @@ class PUPPET_PT_main(bpy.types.Panel):
         launch.separator()
         launch.prop(props, "server_port")
         launch.prop(props, "python_path")
+        if ops_mod._using_bundled_capture_python(props):
+            launch.label(text="Usando runtime incluido · MediaPipe + OpenCV", icon="CHECKMARK")
 
         # --- Kimodo (texto → animación, K2) --- Independiente de la captura.
         box = layout.box()
